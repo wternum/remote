@@ -1,0 +1,6 @@
+/* The workspace only lists three OKX perpetuals: BTC, ETH and SOL.
+   Vela's symbol dialog still renders its full asset-class bar, so keep the
+   two tabs that can return results and hide the empty categories. */
+.vela-sp-tabs .vela-sp-tab:not([data-tab="all"]):not([data-tab="crypto"]) {
+  display: none !important;
+}

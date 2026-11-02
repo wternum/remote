@@ -1,0 +1,210 @@
+[
+  {
+    "path": "drizzle.config.json",
+    "bytes": 156,
+    "remoteBytes": 156,
+    "sha256": "cc44502003e85bb5258a3a5b59522c28238a052d0f19abcf14338c71474467b7",
+    "expected": "cc44502003e85bb5258a3a5b59522c28238a052d0f19abcf14338c71474467b7",
+    "exact": true
+  },
+  {
+    "path": "eslint.config.mjs",
+    "bytes": 365,
+    "remoteBytes": 365,
+    "sha256": "c971926abccc506da1532570c55a95d5298b606901c4801866a4862969c13302",
+    "expected": "c971926abccc506da1532570c55a95d5298b606901c4801866a4862969c13302",
+    "exact": true
+  },
+  {
+    "path": "next.config.ts",
+    "bytes": 104,
+    "remoteBytes": 104,
+    "sha256": "ab4c61f6ee100ae43610a18512f1ebcec842bb2405431e1009266173f21cf772",
+    "expected": "ab4c61f6ee100ae43610a18512f1ebcec842bb2405431e1009266173f21cf772",
+    "exact": true
+  },
+  {
+    "path": "package.json",
+    "bytes": 800,
+    "remoteBytes": 800,
+    "sha256": "970dfe4bf61cacf51b6b8660688e00cfba3eeda5afdf98e6729a9d4498482386",
+    "expected": "970dfe4bf61cacf51b6b8660688e00cfba3eeda5afdf98e6729a9d4498482386",
+    "exact": true
+  },
+  {
+    "path": "postcss.config.mjs",
+    "bytes": 108,
+    "remoteBytes": 108,
+    "sha256": "b8cd36495468ea54e029eb4b2e0e98f0feff6f95d6513e70db37a71c0e3bfba4",
+    "expected": "b8cd36495468ea54e029eb4b2e0e98f0feff6f95d6513e70db37a71c0e3bfba4",
+    "exact": true
+  },
+  {
+    "path": "src/app/api/backtest/route.ts",
+    "bytes": 4255,
+    "remoteBytes": 4255,
+    "sha256": "57ab469f616ddd6ca9115a002e7fa14758511cee5144dd6cb494736cd53ade8e",
+    "expected": "57ab469f616ddd6ca9115a002e7fa14758511cee5144dd6cb494736cd53ade8e",
+    "exact": true
+  },
+  {
+    "path": "src/app/api/data/route.ts",
+    "bytes": 2973,
+    "remoteBytes": 2973,
+    "sha256": "6ac4b9288fcf3984ac477a7ad00f4cec6a843c4117f1fbbb2f7403fb24b56d3f",
+    "expected": "6ac4b9288fcf3984ac477a7ad00f4cec6a843c4117f1fbbb2f7403fb24b56d3f",
+    "exact": true
+  },
+  {
+    "path": "src/app/api/health/route.ts",
+    "bytes": 295,
+    "remoteBytes": 295,
+    "sha256": "85ecde9db86952d444d593f4133df2b517ed768accc487350d35bb0db498357f",
+    "expected": "85ecde9db86952d444d593f4133df2b517ed768accc487350d35bb0db498357f",
+    "exact": true
+  },
+  {
+    "path": "src/app/api/signals/route.ts",
+    "bytes": 2146,
+    "remoteBytes": 2146,
+    "sha256": "73e7473c4e170abf9e8357459de57725ff329a90bf9175ce5c743f788357cb68",
+    "expected": "73e7473c4e170abf9e8357459de57725ff329a90bf9175ce5c743f788357cb68",
+    "exact": true
+  },
+  {
+    "path": "src/app/globals.css",
+    "bytes": 5786,
+    "remoteBytes": 5786,
+    "sha256": "5dc13ef7baa4565c8e79a43d21cc1be99087999b4f95950c73ea6a90c2538f1e",
+    "expected": "5dc13ef7baa4565c8e79a43d21cc1be99087999b4f95950c73ea6a90c2538f1e",
+    "exact": true
+  },
+  {
+    "path": "src/app/layout.tsx",
+    "bytes": 969,
+    "remoteBytes": 969,
+    "sha256": "9a69bbc399ba90c492944dab4d3faa21c622b8bd7534d9f5d38ce2ca297d515f",
+    "expected": "9a69bbc399ba90c492944dab4d3faa21c622b8bd7534d9f5d38ce2ca297d515f",
+    "exact": true
+  },
+  {
+    "path": "src/app/page.tsx",
+    "bytes": 31089,
+    "remoteBytes": 31089,
+    "sha256": "0c1631bc656ce4762df6ca0cbfdd7885aca561b31d50bf15984f1628f93c0ab6",
+    "expected": "0c1631bc656ce4762df6ca0cbfdd7885aca561b31d50bf15984f1628f93c0ab6",
+    "exact": true
+  },
+  {
+    "path": "src/components/CommandDeck.tsx",
+    "bytes": 29539,
+    "remoteBytes": 29539,
+    "sha256": "6fa1d3f27c38b7a96428c0458af7f0b28c932ab0b09d1a4145bad948df87618f",
+    "expected": "6fa1d3f27c38b7a96428c0458af7f0b28c932ab0b09d1a4145bad948df87618f",
+    "exact": true
+  },
+  {
+    "path": "src/components/Header.tsx",
+    "bytes": 7415,
+    "remoteBytes": 7415,
+    "sha256": "310e1050e0b225633c109d59fda484ccfe9ce685a08b01b94baf81f8628a98ad",
+    "expected": "310e1050e0b225633c109d59fda484ccfe9ce685a08b01b94baf81f8628a98ad",
+    "exact": true
+  },
+  {
+    "path": "src/components/StatsDrawer.tsx",
+    "bytes": 22037,
+    "remoteBytes": 22037,
+    "sha256": "10593f0366873011535b22c0258424d8558b1a7c23593cbb490caa3fe6f9adb4",
+    "expected": "10593f0366873011535b22c0258424d8558b1a7c23593cbb490caa3fe6f9adb4",
+    "exact": true
+  },
+  {
+    "path": "src/components/Toasts.tsx",
+    "bytes": 2324,
+    "remoteBytes": 2324,
+    "sha256": "44cc8079b6d62252faec56878e194b940995c779196b83f365a6637866c830af",
+    "expected": "44cc8079b6d62252faec56878e194b940995c779196b83f365a6637866c830af",
+    "exact": true
+  },
+  {
+    "path": "src/components/vela/plugins.ts",
+    "bytes": 15473,
+    "remoteBytes": 15473,
+    "sha256": "85f31f18d60ab0140651f5012baa4619b703fa58303c051e0ccfd94b93401270",
+    "expected": "85f31f18d60ab0140651f5012baa4619b703fa58303c051e0ccfd94b93401270",
+    "exact": true
+  },
+  {
+    "path": "src/components/VelaChart.tsx",
+    "bytes": 13961,
+    "remoteBytes": 13961,
+    "sha256": "8f228aa761858d506272a04210f35e508ac9211a8e468b82b8f5827bd736ca3d",
+    "expected": "8f228aa761858d506272a04210f35e508ac9211a8e468b82b8f5827bd736ca3d",
+    "exact": true
+  },
+  {
+    "path": "src/db/index.ts",
+    "bytes": 547,
+    "remoteBytes": 547,
+    "sha256": "44d8e984cf4d238facb3e984c6a2ffa7abfca11768da1304ff439d2b7246990b",
+    "expected": "44d8e984cf4d238facb3e984c6a2ffa7abfca11768da1304ff439d2b7246990b",
+    "exact": true
+  },
+  {
+    "path": "src/db/schema.ts",
+    "bytes": 2279,
+    "remoteBytes": 2279,
+    "sha256": "0357a003c2fa524db03b578e55c8614cb27991f293e2e751109325d8414268f1",
+    "expected": "0357a003c2fa524db03b578e55c8614cb27991f293e2e751109325d8414268f1",
+    "exact": true
+  },
+  {
+    "path": "src/lib/engine.ts",
+    "bytes": 31123,
+    "remoteBytes": 31123,
+    "sha256": "ab31cbd6ddbf88b34f5585590736fb0b9048697b0cff2f8b23527e79ad7b398d",
+    "expected": "ab31cbd6ddbf88b34f5585590736fb0b9048697b0cff2f8b23527e79ad7b398d",
+    "exact": true
+  },
+  {
+    "path": "src/lib/format.ts",
+    "bytes": 2236,
+    "remoteBytes": 2236,
+    "sha256": "101855bd883126bb52e3c9d3a4fba14129097a0806caaff31c22e14aa2f58197",
+    "expected": "101855bd883126bb52e3c9d3a4fba14129097a0806caaff31c22e14aa2f58197",
+    "exact": true
+  },
+  {
+    "path": "src/lib/okx-ws.ts",
+    "bytes": 11305,
+    "remoteBytes": 11305,
+    "sha256": "60bc0d9277c240df789e8c8f996838fcd2183c1cfe2028d495aea9d4bc54ea51",
+    "expected": "60bc0d9277c240df789e8c8f996838fcd2183c1cfe2028d495aea9d4bc54ea51",
+    "exact": true
+  },
+  {
+    "path": "src/lib/types.ts",
+    "bytes": 5677,
+    "remoteBytes": 5677,
+    "sha256": "227c11c45a911d8d63aadbe4393454d081b083fe74913361d95819a8a4d23c94",
+    "expected": "227c11c45a911d8d63aadbe4393454d081b083fe74913361d95819a8a4d23c94",
+    "exact": true
+  },
+  {
+    "path": "src/server/okx.ts",
+    "bytes": 10546,
+    "remoteBytes": 10546,
+    "sha256": "8ee76dd7244ea393e2ce67ea879d52016db220d5667fc66aa16e12ab1ed22b28",
+    "expected": "8ee76dd7244ea393e2ce67ea879d52016db220d5667fc66aa16e12ab1ed22b28",
+    "exact": true
+  },
+  {
+    "path": "tsconfig.json",
+    "bytes": 723,
+    "remoteBytes": 723,
+    "sha256": "4ea5303fb21d01b83151db57d43246ba2ac0bbb4e79b9e83b3a120b2599c4351",
+    "expected": "4ea5303fb21d01b83151db57d43246ba2ac0bbb4e79b9e83b3a120b2599c4351",
+    "exact": true
+  }
+]

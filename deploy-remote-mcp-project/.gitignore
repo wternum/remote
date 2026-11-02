@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.mcp-import/
+.mcp-tools-output.txt
+.verification/
+test-results/
