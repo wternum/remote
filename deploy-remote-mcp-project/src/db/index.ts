@@ -2,7 +2,8 @@ import type { PGlite } from '@electric-sql/pglite';
 import type { PgliteDatabase } from 'drizzle-orm/pglite';
 import * as schema from './schema';
 
-const asset = (name: string) => new URL(`runtime/${name}`, document.baseURI).href;
+const isBrowser = typeof window !== 'undefined';
+const asset = (name: string) => (typeof document !== 'undefined' ? new URL(`runtime/${name}`, document.baseURI).href : `/runtime/${name}`);
 // 大体积二进制（wasm 8.7MB / data 6MB）在部分托管环境会被裁掉；本地缺失时回退到同版本 CDN
 const PGLITE_VERSION = '0.5.14';
 const cdn = (name: string) => `https://cdn.jsdelivr.net/npm/@electric-sql/pglite@${PGLITE_VERSION}/dist/${name}`;
@@ -26,21 +27,45 @@ async function fetchBinary(name: string, validate: (b: ArrayBuffer) => boolean):
 }
 const loadWasm = (name: string) => fetchBinary(name, isWasm).then(bytes => WebAssembly.compile(bytes));
 
-// Preview-only database transport. The original schema and all SQL callers
-// are imported from the byte-verified remote project without modification.
-let database: PgliteDatabase<typeof schema> | undefined;
+let database: any;
 let client: PGlite | undefined;
 let initialization: Promise<void> | undefined;
 
+function getDatabase() {
+  if (!database && !isBrowser) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Pool } = require('pg');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { drizzle } = require('drizzle-orm/node-postgres');
+      const databaseUrl = process.env.DATABASE_URL;
+      if (databaseUrl) {
+        const p = new Pool({ connectionString: databaseUrl });
+        database = drizzle(p, { schema });
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return database;
+}
+
 export const db = new Proxy({} as PgliteDatabase<typeof schema>, {
   get(_target, property) {
-    if (!database) throw new Error('Local database is not available');
-    const value = Reflect.get(database, property);
-    return typeof value === 'function' ? value.bind(database) : value;
+    const targetDb = getDatabase();
+    if (!targetDb) {
+      throw new Error('Local database is not available');
+    }
+    const value = Reflect.get(targetDb, property);
+    return typeof value === 'function' ? value.bind(targetDb) : value;
   },
 });
 
-export const pool = { end: () => client?.close() };
+export const pool = {
+  end: () => {
+    if (client) client.close();
+  },
+};
 
 const migrations = `
   CREATE TABLE IF NOT EXISTS signals (
@@ -87,6 +112,9 @@ const migrations = `
 `;
 
 export function initializeDatabase(): Promise<void> {
+  if (typeof window === 'undefined') {
+    return Promise.resolve();
+  }
   if (!initialization) {
     initialization = (async () => {
       const [runtime, pgliteWasmModule, initdbWasmModule, fsBundle] = await Promise.all([

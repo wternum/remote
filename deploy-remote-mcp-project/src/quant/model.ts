@@ -23,7 +23,8 @@ export type FactorKey =
   | 'cvdDiverge'
   | 'sweepTrap'
   | 'testDelta'
-  | 'oiTrap';
+  | 'oiTrap'
+  | 'touchFlow';
 
 export type FactorGroup = '订单流' | '结构' | '风险';
 
@@ -41,6 +42,14 @@ export interface FactorDef {
 }
 
 export const FACTORS: FactorDef[] = [
+  {
+    key: 'touchFlow',
+    label: '触顶订单流',
+    short: 'TOUCH',
+    group: '订单流',
+    weight: 0.95,
+    hint: '价格触及（或逼近）前高/前低时，用订单流判断是真突破还是假突破：冲向关键位的主动成交是否强劲、触及那根是否被吸收（放量收在位内、突破方没赢得主动成交）、拒绝影线、累计主动成交（CVD）是否跟上价格、触及之后反方向主动成交是否接管。+1 = 明显的假突破/被拒绝，−1 = 真突破（突破方主导或收盘已站到关键位外侧）。',
+  },
   {
     key: 'volDiverge',
     label: '二次测试缩量',

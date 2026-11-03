@@ -1,43 +1,56 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vela } from '@luxalgo/vela';
-import { Activity, ArrowDownRight, ArrowUpRight, Crosshair, Eye, EyeOff, ShieldCheck, SlidersHorizontal, Target, Zap } from 'lucide-react';
+import { ChevronDown, Crosshair, Eye, EyeOff, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { runScan, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
 import { computeLevels } from '@/lib/engine';
 import { summarize, thresholdSweep } from '@/quant/stats';
 import { gradeMeta } from '@/quant/model';
 import { clampThreshold, getConfig, LIMITS, setConfig, subscribeConfig, type EngineConfig } from '@/quant/config';
-import { useChartBars } from './useChartBars';
+import { useChartBars, useLastPrice } from './useChartBars';
 import { useFlow } from './useFlow';
 import FlowRead from './FlowRead';
-import { annotateCandidate, clearAnnotations, clearLevels, clearRead, paintLevels, paintRead, type ReadAnnotation } from './annotate';
+import { annotateCandidate, clearAnnotations, clearLevels, clearRead, hoverSignal, paintLevels, paintRead, type ReadAnnotation } from './annotate';
 import { tfMs } from './okxProvider';
 import type { Ctx } from '@/quant/scan';
 
 const LONG = '#2ebd85';
 const SHORT = '#f6465d';
-const CYAN = '#37c8dd';
-const AMBER = '#f0b90b';
 const MUT = '#8c96ab';
+const LATEST_BARS = 12;
 
 const fmt = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '—');
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${fmt(v, d)}`;
-const hhmm = (ts: number) => {
+const hm = (ts: number) => {
   const t = new Date(ts);
-  return `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+  return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
 };
 const tfLabel = (tf: string) => (tf === 'D' ? '1D' : tf === 'W' ? '1W' : Number(tf) >= 60 ? `${Number(tf) / 60}H` : `${tf}m`);
+const shapeOf = (c: Candidate) => (c.pattern.startsWith('db') ? 'W 双底' : 'M 双顶');
 
-type Tab = 'signals' | 'engine';
+function resultOf(c: Candidate, pass: boolean) {
+  const r = c.outcome?.filled ? c.outcome.r : null;
+  if (r == null) return { text: '进行中', tone: MUT };
+  if (!pass) return { text: '未过门槛', tone: MUT };
+  return { text: `${signed(r, 1)}R`, tone: r > 0 ? LONG : SHORT };
+}
+
+function Price() {
+  const px = useLastPrice();
+  return <div className="tp-px">{px != null ? px.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—'}</div>;
+}
 
 export default function TradePanel({ getChart, onOpenEngine }: { getChart: () => Vela | null; onOpenEngine: () => void }) {
   const bars = useChartBars(getChart);
   const [cfg, setCfg] = useState<EngineConfig>(() => getConfig());
   const [exitPlan, setExitPlan] = useState<ExitPlan>('r15');
-  const [tab, setTab] = useState<Tab>('signals');
   const [focus, setFocus] = useState<string | null>(null);
   const [showLevels, setShowLevels] = useState(true);
   const [onlyPass, setOnlyPass] = useState(false);
-  const lastToastRef = useRef('');
+  const [gear, setGear] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [detail, setDetail] = useState(false);
+  const [glow, setGlow] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const off = subscribeConfig(setCfg);
@@ -48,11 +61,8 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
 
   const barMs = tfMs(bars.timeframe || '5');
   const engineBar = Number(bars.timeframe) >= 15 ? '15m' : '5m';
-  // 真实订单流（OKX 主动买卖成交额 / 持仓量）：随市场与收盘 K 线同步
   const flow = useFlow(bars.symbol, bars.timeframe, bars.closedTs, bars.candles[0]?.ts ?? 0);
 
-  // 扫描只在「市场 / 已收盘 K 线变化 / 出场方案」变化时重算，
-  // 而不是每个实时 tick（6000 根全量扫描会卡顿）。
   const scanKey = `${bars.symbol}|${bars.timeframe}|${bars.closedTs}|${exitPlan}|${cfg.entryMode}|flow${flow.version}`;
   const scanKeyRef = useRef('');
   const candlesRef = useRef(bars.candles);
@@ -60,7 +70,6 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
   const [scan, setScan] = useState<{ rows: Candidate[]; levels: ReturnType<typeof computeLevels>; n: number; ctx: Ctx; coverage: number } | null>(null);
   const flowRef = useRef(flow.snapshot);
   flowRef.current = flow.snapshot;
-  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     if (scanKey === scanKeyRef.current) return;
@@ -70,31 +79,32 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
       setScan(null);
       return;
     }
-    setScanning(true);
-    // 让出主线程一帧，避免与图表渲染争抢
     const t = window.setTimeout(() => {
       const closed = candles.slice(0, -1);
       const r = runScan(closed, engineBar, undefined, bars.symbol, exitPlan, flowRef.current);
       const pool = (cfg.entryMode === 'touch' ? r.touch : r.confirm).sort((a, b) => b.ts - a.ts);
       setScan({ rows: pool, levels: computeLevels(closed), n: closed.length, ctx: r.ctx, coverage: r.ctx.flowCoverage });
-      setScanning(false);
     }, 60);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanKey]);
 
-  const rows = useMemo(() => (scan?.rows ?? []).filter(c => !onlyPass || c.proba >= cfg.threshold), [scan, onlyPass, cfg.threshold]);
-  void scanning;
-  const stat = useMemo(() => summarize(scan?.rows ?? [], cfg.threshold), [scan, cfg.threshold]);
+  const threshold = cfg.threshold;
+  const latest = useMemo(() => (scan ? scan.rows.find(c => c.idx >= scan.n - 1 - LATEST_BARS) ?? null : null), [scan]);
+  const old = useMemo(
+    () => (scan?.rows ?? []).filter(c => c.id !== latest?.id && (!onlyPass || c.proba >= threshold)),
+    [scan, latest, onlyPass, threshold],
+  );
+  const stat = useMemo(() => summarize(scan?.rows ?? [], threshold), [scan, threshold]);
   const base = useMemo(() => summarize(scan?.rows ?? [], 0), [scan]);
   const sweep = useMemo(() => thresholdSweep(scan?.rows ?? [], 0.42, 0.82, 11), [scan]);
 
-  // 最新一笔是否刚在刚收盘 K 线出现（实时提醒）
-  const live = useMemo(() => {
-    const r = scan?.rows[0];
-    if (!r || !bars.closedTs) return null;
-    return r.ts === bars.closedTs ? r : null;
-  }, [scan, bars.closedTs]);
+  useEffect(() => {
+    if (!latest) return;
+    setGlow(true);
+    const t = window.setTimeout(() => setGlow(false), 1100);
+    return () => window.clearTimeout(t);
+  }, [latest?.id]);
 
   useEffect(() => {
     const chart = getChart();
@@ -107,14 +117,24 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
   }, [scan, showLevels, getChart]);
 
   useEffect(() => {
-    // 市场切换时清理聚焦标注
     const chart = getChart();
     setFocus(null);
+    setDetail(false);
     if (chart) {
       clearAnnotations(chart);
       clearRead(chart);
     }
   }, [bars.symbol, bars.timeframe, getChart]);
+
+  useEffect(() => {
+    if (!gear) return;
+    const close = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (!el?.closest('.tp-pop, .tp-gear')) setGear(false);
+    };
+    window.addEventListener('mousedown', close);
+    return () => window.removeEventListener('mousedown', close);
+  }, [gear]);
 
   const onReadAnnotate = useCallback(
     (ann: ReadAnnotation | null) => {
@@ -128,17 +148,11 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
     [scan, flow.syncing, flow.unsupported, flow.snapshot],
   );
 
-  useEffect(() => {
-    if (!live) return;
-    const key = `${bars.symbol}|${live.id}`;
-    if (lastToastRef.current === key) return;
-    lastToastRef.current = key;
-  }, [live, bars.symbol]);
-
   const pick = useCallback(
     (c: Candidate) => {
       const chart = getChart();
       if (!chart) return;
+      hoverSignal(chart, null);
       if (focus === c.id) {
         setFocus(null);
         clearAnnotations(chart);
@@ -150,223 +164,183 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
     [getChart, focus, barMs, engineBar],
   );
 
-  const threshold = cfg.threshold;
+  const hover = useCallback(
+    (c: Candidate | null) => {
+      const chart = getChart();
+      if (chart) hoverSignal(chart, c);
+    },
+    [getChart],
+  );
+
+  const onListKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return;
+    const items = [latest, ...old].filter((c): c is Candidate => !!c);
+    if (!items.length) return;
+    e.preventDefault();
+    const i = Math.max(0, items.findIndex(c => c.id === focus));
+    if (e.key === 'Enter') pick(items[i] ?? items[0]);
+    else pick(items[Math.min(items.length - 1, Math.max(0, i + (e.key === 'ArrowDown' ? 1 : -1)))]);
+  };
+
+  const baseSym = bars.symbol.replace('-USDT-SWAP', '') || '—';
 
   return (
     <div className="tp-root">
-      {/* 市场摘要 */}
       <div className="tp-head">
         <div className="tp-sym">
-          <span className="tp-sym-main">{bars.symbol.replace('-USDT-SWAP', '') || '—'}</span>
-          <span className="tp-sym-sub">USDT 永续 · {bars.timeframe ? tfLabel(bars.timeframe) : '—'} · OKX</span>
+          <span className="tp-sym-main">{baseSym}</span>
+          <span className="tp-sym-sub">{bars.timeframe ? tfLabel(bars.timeframe) : '—'} · OKX</span>
         </div>
-        <div className="tp-px" style={{ color: live ? (live.side === 'long' ? LONG : SHORT) : '#e7ecf5' }}>
-          {bars.lastPx != null ? bars.lastPx.toLocaleString('en-US', { maximumFractionDigits: 4 }) : '—'}
+        <div className="tp-head-right">
+          <Price />
+          <button className="tp-gear" aria-label="设置" aria-expanded={gear} onClick={() => setGear(v => !v)}>
+            <SlidersHorizontal size={14} />
+          </button>
         </div>
       </div>
 
-      {/* 实时结论 */}
-      <div className={`tp-live ${live ? (live.proba >= threshold ? 'ok' : 'weak') : ''}`}>
-        {live ? (
-          <>
-            <div className="tp-live-ring" style={{ ['--p' as string]: `${Math.round(live.proba * 100)}%`, ['--c' as string]: gradeMeta(live.grade).color }}>
-              <b>{Math.round(live.proba * 100)}</b>
-              <i>%</i>
-            </div>
-            <div className="tp-live-body">
-              <div className="tp-live-title">
-                <span className={`tp-side ${live.side}`}>{live.side === 'long' ? '做多 BUY' : '做空 SELL'}</span>
-                {live.pattern.startsWith('db') ? 'W 双底二次测试' : 'M 双顶二次测试'}
-              </div>
-              <div className="tp-live-sub">
-                {live.proba >= threshold ? `通过 ${Math.round(threshold * 100)}% 门槛 · ${gradeMeta(live.grade).label}` : `低于 ${Math.round(threshold * 100)}% 门槛 · 不入场`}
-              </div>
-              <div className="tp-live-prices">
-                <span>E <b style={{ color: AMBER }}>{live.entry}</b></span>
-                <span>SL <b style={{ color: SHORT }}>{live.stop}</b></span>
-                <span>TP <b style={{ color: LONG }}>{live.tp}</b></span>
-                <span>R:R <b>{fmt(live.rr, 1)}</b></span>
-              </div>
-            </div>
-            <button className="tp-mini-btn" title="在图上标注" onClick={() => pick(live)}>
-              <Crosshair size={13} />
-            </button>
-          </>
+      {gear && (
+        <div className="tp-pop" role="dialog" aria-label="设置">
+          <label className="tp-pop-row">
+            <span>概率门槛</span>
+            <b>{Math.round(threshold * 100)}%</b>
+          </label>
+          <input
+            type="range"
+            className="ce-range"
+            min={LIMITS.min}
+            max={LIMITS.max}
+            step={LIMITS.step}
+            value={threshold}
+            onChange={e => setConfig({ threshold: clampThreshold(Number(e.target.value)) })}
+            aria-label="概率门槛"
+          />
+          <label className="tp-pop-row">
+            <span>出场</span>
+            <select value={exitPlan} onChange={e => setExitPlan(e.target.value as ExitPlan)} aria-label="出场方案">
+              {EXIT_PLANS.map(p => (
+                <option key={p.id} value={p.id} title={p.hint}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className={`tp-chip ${showLevels ? 'on' : ''}`} onClick={() => setShowLevels(v => !v)}>
+            {showLevels ? <Eye size={11} /> : <EyeOff size={11} />} 关键位
+          </button>
+          <button className="tp-chip accent" onClick={onOpenEngine}>
+            <ShieldCheck size={11} /> 引擎详情
+          </button>
+        </div>
+      )}
+
+      <div className="tp-sec">
+        <div className="tp-sec-h">
+          最新信号
+          <button className="tp-help" title="最近 12 根 K 线内、价格第二次回到历史顶/底且订单流达到门槛时给出。概率是模型倾向，不是历史胜率。">?</button>
+        </div>
+        {!scan ? (
+          <div className="tp-skel" aria-busy="true">
+            <i /><i /><i />
+          </div>
+        ) : latest ? (
+          <LatestCard c={latest} threshold={threshold} on={focus === latest.id} glow={glow} open={detail} onToggle={() => setDetail(v => !v)} onPick={() => pick(latest)} />
         ) : (
-          <>
-            <Activity size={15} className="tp-dim" />
-            <div className="tp-live-body">
-              <div className="tp-live-title tp-dim">最新收盘 K 线上没有二次测试形态</div>
-              <div className="tp-live-sub">引擎只在价格第二次回到历史顶/底关键位、且订单流与结构证据达标时发出信号</div>
-            </div>
-          </>
+          <div className="tp-quiet">暂无新信号</div>
         )}
+        <FlowRead ctx={scan?.ctx ?? null} rows={scan?.rows ?? []} closedTs={bars.closedTs} threshold={threshold} barMs={barMs} flow={flowInfo} onAnnotate={onReadAnnotate} />
       </div>
 
-      {/* 订单流判读：二次测试概率 / 诱多诱空 / 突破回调跟随 */}
-      <FlowRead ctx={scan?.ctx ?? null} rows={scan?.rows ?? []} closedTs={bars.closedTs} threshold={threshold} lastPx={bars.lastPx} barMs={barMs} flow={flowInfo} onAnnotate={onReadAnnotate} />
-
-      {/* 门槛 */}
-      <div className="tp-threshold">
-        <SlidersHorizontal size={12} />
-        <span className="tp-th-label">概率门槛</span>
-        <input
-          type="range"
-          className="ce-range"
-          min={LIMITS.min}
-          max={LIMITS.max}
-          step={LIMITS.step}
-          value={threshold}
-          onChange={e => setConfig({ threshold: clampThreshold(Number(e.target.value)) })}
-          aria-label="概率门槛"
-        />
-        <b className="tp-th-val">{Math.round(threshold * 100)}%</b>
-      </div>
-
-      {/* 出场方案 + 显示开关 */}
-      <div className="tp-row">
-        <div className="tp-chips">
-          {EXIT_PLANS.map(p => (
-            <button key={p.id} className={`tp-chip ${exitPlan === p.id ? 'on' : ''}`} title={p.hint} onClick={() => setExitPlan(p.id)}>
-              {p.label}
-            </button>
-          ))}
+      <div className="tp-sec tp-sec-grow">
+        <div className="tp-sec-h">
+          旧信号
+          <span className="tp-count">{old.length}</span>
+          <button className={`tp-filter ${onlyPass ? 'on' : ''}`} onClick={() => setOnlyPass(v => !v)} aria-pressed={onlyPass}>
+            {onlyPass ? '通过门槛' : '全部'}
+          </button>
         </div>
-      </div>
-      <div className="tp-row tp-row-tools">
-        <button className={`tp-chip ${showLevels ? 'on' : ''}`} onClick={() => setShowLevels(v => !v)} title="在图上显示当前仍有效的历史顶/底关键位">
-          {showLevels ? <Eye size={11} /> : <EyeOff size={11} />} 关键位
-        </button>
-        <button className={`tp-chip ${onlyPass ? 'on' : ''}`} onClick={() => setOnlyPass(v => !v)}>
-          <Target size={11} /> 仅看通过门槛
-        </button>
-        <button className="tp-chip accent" onClick={onOpenEngine} title="打开完整的入场确认引擎（校准 / 样本外 / 寻优）">
-          <ShieldCheck size={11} /> 引擎详情
-        </button>
-      </div>
-
-      {/* KPI */}
-      <div className="tp-kpis">
-        <div className="tp-kpi">
-          <span>门槛后胜率</span>
-          <b style={{ color: LONG }}>{fmt(stat.winRate, 1)}%</b>
-          <i>{stat.traded}/{base.traded} 笔</i>
-        </div>
-        <div className="tp-kpi">
-          <span>期望 R/笔</span>
-          <b style={{ color: stat.avgR >= 0 ? LONG : SHORT }}>{signed(stat.avgR)}</b>
-          <i>
-            无门槛 {signed(base.avgR)}
-          </i>
-        </div>
-        <div className="tp-kpi">
-          <span>净收益 R</span>
-          <b style={{ color: stat.totalR >= 0 ? LONG : SHORT }}>{signed(stat.totalR, 1)}</b>
-          <i>回撤 {fmt(stat.maxDD, 1)}R</i>
-        </div>
-      </div>
-
-      {/* 门槛扫描迷你图 */}
-      <div className="tp-sweep" title="不同门槛下的期望值（绿=正，红=负）与成交笔数">
-        {sweep.map(s => {
-          const h = Math.min(100, Math.abs(s.avgR) * 120 + 8);
-          const cur = Math.abs(s.thr - threshold) < 0.021;
-          return (
-            <div key={s.thr} className={`tp-sweep-col ${cur ? 'cur' : ''}`} onClick={() => setConfig({ threshold: clampThreshold(s.thr) })}>
-              <div className="tp-sweep-bar" style={{ height: `${h}%`, background: s.avgR >= 0 ? LONG : SHORT, opacity: s.traded ? 0.85 : 0.2 }} />
-              <span>{Math.round(s.thr * 100)}</span>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Tabs */}
-      <div className="tp-tabs">
-        <button className={tab === 'signals' ? 'on' : ''} onClick={() => setTab('signals')}>
-          <Zap size={11} /> 信号 {rows.length}
-        </button>
-        <button className={tab === 'engine' ? 'on' : ''} onClick={() => setTab('engine')}>
-          <ShieldCheck size={11} /> 说明
-        </button>
-      </div>
-
-      {tab === 'signals' ? (
-        <div className="tp-list">
-          {rows.length === 0 ? (
-            <div className="tp-empty">
-              {scan ? '该范围内没有可结算的双顶/双底二次测试' : '等待图表加载足够的 K 线…'}
-              <small>可切换币种/周期，或放宽门槛</small>
-            </div>
+        <div className="tp-list" ref={listRef} tabIndex={0} onKeyDown={onListKey} aria-label="旧信号，方向键切换，回车查看">
+          {scan && old.length === 0 ? (
+            <div className="tp-quiet">{onlyPass ? '没有通过门槛的旧信号' : '没有更早的信号'}</div>
           ) : (
-            rows.slice(0, 80).map(c => {
+            old.slice(0, 80).map(c => {
               const pass = c.proba >= threshold;
-              const g = gradeMeta(c.grade);
-              const r = c.outcome?.filled ? c.outcome.r : null;
+              const res = resultOf(c, pass);
               return (
-                <button key={c.id} className={`tp-sig ${focus === c.id ? 'focus' : ''} ${pass ? '' : 'skip'}`} onClick={() => pick(c)} style={{ borderLeftColor: c.side === 'long' ? LONG : SHORT }}>
-                  <div className="tp-sig-top">
-                    <span className={`tp-side ${c.side}`}>{c.side === 'long' ? '多' : '空'}</span>
-                    <span className="tp-sig-name">{c.pattern.startsWith('db') ? 'W 双底' : 'M 双顶'}</span>
-                    <span className="tp-sig-time">{hhmm(c.ts)}</span>
-                    <span className="tp-sig-p" style={{ color: pass ? g.color : MUT }}>
-                      {Math.round(c.proba * 100)}% {c.grade}
-                    </span>
-                  </div>
-                  <div className="tp-sig-bar">
-                    <i style={{ width: `${c.proba * 100}%`, background: pass ? g.color : '#3a4356' }} />
-                    <em style={{ left: `${threshold * 100}%` }} />
-                  </div>
-                  <div className="tp-sig-bot">
-                    <span>E {c.entry}</span>
-                    <span>SL {c.stop}</span>
-                    <span>TP {c.tp}</span>
-                    <span className="tp-sig-r" style={{ color: r == null ? MUT : r > 0 ? LONG : SHORT }}>
-                      {r == null ? '进行中' : pass ? `${signed(r)}R` : '门槛外'}
-                      {r != null && (r > 0 ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />)}
-                    </span>
-                  </div>
-                  {c.tags.length > 0 && (
-                    <div className="tp-sig-tags">
-                      {c.tags.slice(0, 4).map((t, i) => (
-                        <span key={`${t}${i}`} className={t.startsWith('诱') ? 'trap' : undefined}>{t}</span>
-                      ))}
-                      {c.flowSource === 'taker' && <span className="real">真实订单流</span>}
-                    </div>
-                  )}
+                <button
+                  key={c.id}
+                  className={`tp-item ${focus === c.id ? 'on' : ''} ${pass ? '' : 'dim'}`}
+                  onClick={() => pick(c)}
+                  onMouseEnter={() => hover(c)}
+                  onMouseLeave={() => hover(null)}
+                >
+                  <i className={c.side === 'long' ? 'up' : 'dn'} />
+                  <b>{shapeOf(c)}</b>
+                  <span>{hm(c.ts)}</span>
+                  <span className="tp-item-p" style={{ color: pass ? gradeMeta(c.grade).color : MUT }}>{Math.round(c.proba * 100)}%</span>
+                  <em style={{ color: res.tone }}>{res.text}</em>
                 </button>
               );
             })
           )}
         </div>
-      ) : (
-        <div className="tp-list tp-doc">
-          <p>
-            <b style={{ color: CYAN }}>怎么判定入场</b>
-            <br />
-            引擎识别历史顶部/底部关键位，等价格<b>第二次</b>回到该区域；只有当订单流（二次测试缩量、主动成交背离、CVD 极值背离、扫损陷阱、关键位吸收、拒绝影线、确认K主动方向、持仓被套）与结构（关键位完整度、形态高度、跨度、趋势转平、推进减速）证据合成的概率 ≥ 门槛，才给出信号。
-          </p>
-          <p>
-            <b style={{ color: CYAN }}>订单流判读卡</b>
-            <br />
-            主动买卖差来自 OKX 公共接口的每根 K 线真实 taker 买入/卖出成交额（约覆盖最近 4–5 天），更早的 K 线退回 K 线形态近似。双顶给出<b>下跌概率</b>、双底给出<b>上涨概率</b>；「诱多/诱空」= 刺穿前高/前低后收回，且刺穿期间主动成交站在反转一侧或追单被吸收；「突破回调」判断突破 K 的量能与主动方向、回调是否缩量、回踩关键位是否守住，并给出本图历史上「突破即追」与「等回踩」的兑现率。
-          </p>
-          <p>
-            <b style={{ color: CYAN }}>图上标注</b>
-            <br />
-            点击任意一笔：虚线射线 = 关键位；点线 = 颈线；头寸框 = 入场/止损/目标（框头显示 R:R）；箭头 = 信号 K 与概率等级。再点一次取消。
-          </p>
-          <p>
-            <b style={{ color: CYAN }}>出场方案</b>
-            <br />
-            原项目目标看颈线，超时平仓占比高。默认改用「固定 1.5R」；可切换对照，统计即时重算。
-          </p>
-          <p>
-            <b style={{ color: AMBER }}>统计口径</b>
-            <br />
-            本面板统计仅基于当前图表加载的 K 线（{scan?.n ?? 0} 根）；样本外检验、概率校准与配置寻优请打开「引擎详情」。
-          </p>
+      </div>
+
+      <button className="tp-foot" onClick={() => setStatsOpen(v => !v)} aria-expanded={statsOpen}>
+        <span>门槛 {Math.round(threshold * 100)}% · {stat.traded} 笔 · 胜率 {fmt(stat.winRate, 0)}% · 期望 {signed(stat.avgR)}R</span>
+        <ChevronDown size={13} className={statsOpen ? 'flip' : ''} />
+      </button>
+      {statsOpen && (
+        <div className="tp-stats">
+          <div className="tp-kpis">
+            <div className="tp-kpi"><span>胜率</span><b style={{ color: LONG }}>{fmt(stat.winRate, 1)}%</b><i>{stat.traded}/{base.traded}</i></div>
+            <div className="tp-kpi"><span>期望</span><b style={{ color: stat.avgR >= 0 ? LONG : SHORT }}>{signed(stat.avgR)}</b><i>无门槛 {signed(base.avgR)}</i></div>
+            <div className="tp-kpi"><span>净收益</span><b style={{ color: stat.totalR >= 0 ? LONG : SHORT }}>{signed(stat.totalR, 1)}R</b><i>回撤 {fmt(stat.maxDD, 1)}R</i></div>
+          </div>
+          <div className="tp-sweep" title="不同门槛下的期望值，点击切换">
+            {sweep.map(s => {
+              const h = Math.min(100, Math.abs(s.avgR) * 120 + 8);
+              const cur = Math.abs(s.thr - threshold) < 0.021;
+              return (
+                <div key={s.thr} className={`tp-sweep-col ${cur ? 'cur' : ''}`} onClick={() => setConfig({ threshold: clampThreshold(s.thr) })}>
+                  <div className="tp-sweep-bar" style={{ height: `${h}%`, background: s.avgR >= 0 ? LONG : SHORT, opacity: s.traded ? 0.85 : 0.2 }} />
+                  <span>{Math.round(s.thr * 100)}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function LatestCard({
+  c, threshold, on, glow, open, onToggle, onPick,
+}: {
+  c: Candidate; threshold: number; on: boolean; glow: boolean; open: boolean; onToggle: () => void; onPick: () => void;
+}) {
+  const pass = c.proba >= threshold;
+  const g = gradeMeta(c.grade);
+  const res = resultOf(c, pass);
+  return (
+    <div className={`tp-card ${pass ? 'ok' : 'weak'} ${on ? 'on' : ''} ${glow ? 'glow' : ''}`}>
+      <div className="tp-card-top">
+        <i className={c.side === 'long' ? 'up' : 'dn'} />
+        <b>{shapeOf(c)} · {c.side === 'long' ? '做多' : '做空'}</b>
+        <span className="tp-card-p" style={{ color: g.color }}>{Math.round(c.proba * 100)}% {c.grade}</span>
+      </div>
+      <div className="tp-card-sub">{hm(c.ts)} · {res.text}{pass ? '' : ' · 未过门槛'}</div>
+      <div className="tp-card-px">
+        <span>入场 <b>{c.entry}</b></span>
+        <span>止损 <b>{c.stop}</b></span>
+        <span>目标 <b>{c.tp}</b></span>
+      </div>
+      {open && <div className="tp-card-note">{c.headline || c.note}</div>}
+      <div className="tp-card-acts">
+        <button onClick={onPick}><Crosshair size={12} /> {on ? '取消' : '在图上查看'}</button>
+        <button onClick={onToggle}>{open ? '收起' : '详情'}</button>
+      </div>
     </div>
   );
 }

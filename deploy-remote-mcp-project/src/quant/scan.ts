@@ -213,6 +213,9 @@ export function collectEvidence(ctx: Ctx, sig: ScanSignal, live?: LiveFlow): (nu
   else if (read.sweep.occurred) set('sweepTrap', (read.trap.score - 0.35) / 0.45);
   else set('sweepTrap', 0);
 
+  // 16b) 触顶/触底订单流：真突破 vs 假突破（本策略的核心判据）
+  set('touchFlow', read.touch.evidence);
+
   // 17) 确认K真实主动方向（仅真实数据）
   set('testDelta', read.confirm.known ? read.confirm.deltaRatio * dir * 3 : null);
 

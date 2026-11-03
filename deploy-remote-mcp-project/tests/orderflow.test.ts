@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { Candle } from '../src/lib/types';
 import { buildContext } from '../src/quant/context';
 import type { FlowSnapshot } from '../src/quant/flow';
-import { findSwingLevels, readBreakout, readSecondTest, scanBreakouts } from '../src/quant/orderflow';
+import { findSwingLevels, readBreakout, readSecondTest, readTouch, scanBreakouts, scanTouches } from '../src/quant/orderflow';
 import { runScan } from '../src/quant/scan';
 import { scanDoubles, DEFAULT_PARAMS } from '../remote/setup-mcp-project-locally/src/lib/engine';
 
@@ -184,6 +184,58 @@ function breakoutScenario(kind: 'follow' | 'failed' | 'chase') {
   const total = Object.values(stats.buckets).reduce((s, b) => s + b.n, 0) + stats.chase.n;
   assert.ok(total >= 1, '应有统计样本');
   console.log('PASS 历史突破统计', JSON.stringify(stats));
+}
+
+// ── 场景 5：触顶但没有超过前高 —— 订单流决定是“假突破”还是“真突破” ──
+function touchScene(kind: 'weak' | 'strong' | 'accepted') {
+  const segs: Seg[] = [
+    { to: 95, bars: 60, vol: V, flow: 0 },
+    { to: 100, bars: 40, vol: 1.4 * V, flow: 0.3 }, // 第一顶
+    { to: 96, bars: 40, vol: V, flow: -0.25 }, // 回落
+    ...(kind === 'strong'
+      ? [{ to: 99.9, bars: 30, vol: 2.2 * V, flow: 0.45 }] // 放量、主动买入强劲地冲向前高
+      : [
+          { to: 98.3, bars: 18, vol: 1.2 * V, flow: 0.1 }, // 先有一段正常推进
+          { to: 99.9, bars: 12, vol: 0.55 * V, flow: -0.1 }, // 靠近前高时缩量、主动买入转弱
+        ]),
+  ];
+  const total = 60 + 40 + 40 + 30;
+  const { cs, ratios } = build(95, segs, (i, c) =>
+    kind === 'accepted' && i >= total - 2 ? { ...c, o: c.c, h: c.c + 1.3, l: c.c - 0.1, c: c.c + 1.1, v: 2 * V } : c,
+  );
+  const flow = flowOf(cs, ratios);
+  const ctx = buildContext(cs, flow);
+  const lv = findSwingLevels(ctx).find(l => l.side === 'top')!;
+  return { ctx, lv };
+}
+
+{
+  const w = touchScene('weak');
+  const weak = readTouch(w.ctx, w.lv, w.ctx.n - 1);
+  assert.equal(weak.verdict, 'reject', `缩量弱买入触顶应判拒绝：${weak.headline}`);
+  assert.ok(weak.fakeProb >= 0.6, `假突破概率应 ≥60%，实际 ${weak.fakeProb}`);
+  assert.ok(weak.plan && weak.plan.stop > weak.plan.entry && weak.plan.entry > weak.plan.tp, '做空计划：止损 > 入场 > 目标');
+
+  const s = touchScene('strong');
+  const strong = readTouch(s.ctx, s.lv, s.ctx.n - 1);
+  assert.equal(strong.verdict, 'breakout', `放量强买冲击前高应判真突破：${strong.headline}`);
+  assert.ok(strong.fakeProb <= 0.4, `假突破概率应 ≤40%，实际 ${strong.fakeProb}`);
+  assert.ok(weak.fakeProb - strong.fakeProb > 0.3, '同一几何下，订单流不同，概率必须明显不同');
+
+  const k = touchScene('accepted');
+  const acc = readTouch(k.ctx, k.lv, k.ctx.n - 1);
+  assert.equal(acc.kind, 'accepted');
+  assert.equal(acc.verdict, 'breakout');
+  assert.equal(acc.plan, null, '突破被接受后不再给反手计划');
+  console.log('PASS 触顶订单流 · 弱买入', weak.fakeProb, '→ 假突破；强买入', strong.fakeProb, '→ 真突破；站上前高 → 不做空');
+}
+
+// ── 场景 6：触顶历史统计可运行 ──
+{
+  const { ctx } = touchScene('weak');
+  const { stats } = scanTouches(ctx);
+  assert.ok(stats.n >= 0 && stats.reject <= stats.n);
+  console.log('PASS 触顶历史统计', JSON.stringify(stats));
 }
 
 console.log('\n订单流判读测试全部通过');

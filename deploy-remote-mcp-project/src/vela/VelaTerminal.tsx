@@ -12,12 +12,15 @@ import { syncTopbarLabels } from './topbarLabels';
 import { enhanceDrawingMenus } from '../lib/drawing-menu';
 import { installQuantHover } from './toolbarSlide';
 import { installToolbarHover } from './toolbarHover';
+import { registerAnnotLayers } from './annotLayer';
 
 // 一次性注册：语言包 + 侧栏 + 指标多选（模块级，Vela 要求在构造前完成）
 registerLocale(zhHans);
 registerTradePanel();
 registerIndicatorPicker();
 registerMarketControls();
+// 系统标注图层：渲染器在构造时按注册表实例化图层，必须先于 new VelaWorkspace
+registerAnnotLayers();
 
 export interface VelaTerminalProps {
   symbol?: string;

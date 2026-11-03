@@ -53,7 +53,7 @@ try {
   const text = (await card.textContent()) ?? '';
   if (view === 'test') assert.ok(/下跌|上涨/.test(text) && /诱多|诱空|扫损|无陷阱/.test(text), '二次测试视图应含概率与陷阱判定');
   if (view === 'breakout') assert.ok(/回踩|反抽/.test(text) && /突破K/.test(text), '突破视图应含回踩判读');
-  if (view === 'approach') assert.ok(/正在接近/.test(text), '接近视图应含关键位');
+  if (view === 'approach') assert.ok(/接近|触及|刺破/.test(text) && /假突破/.test(text), '接近/触及视图应含关键位与假突破概率');
   pass(`当前判读视图：${view}`);
 
   // 信号列表应带订单流来源/陷阱标签（如有信号）

@@ -108,6 +108,242 @@ export function legsOf(pv: Pivot) {
   return { l1a, l1b, l2a, l2b };
 }
 
+// ─── 触顶 / 触底：真突破还是假突破（订单流判读） ──────────────
+//  场景：
+//   ① 前高(低)已被标出，价格再次逼近/触及但没有超过 → 订单流判断“拒绝”还是“继续冲”
+//   ② 等高双顶(底)，二顶(底)略微刺破前高(低) → 订单流判断是扫损假突破还是真突破
+//  判据（均按突破方向归一，正数 = 有利于“被拒绝/假突破”）：
+//   e1 冲向关键位的主动成交是否强劲、是否放量推进（越强越像真突破）
+//   e2 触及那一根：放量却收在位内且突破方没赢得主动成交 = 被吸收；缩量 = 追价不足；放量收在位外 = 突破方主导
+//   e3 触及那一根的拒绝影线
+//   e4 近 12 根累计主动成交（CVD）有没有跟上价格
+//   e5 触及之后（若已有收盘 K）反方向主动成交是否接管
+export type TouchKind = 'approach' | 'touch' | 'sweep' | 'accepted';
+export type TouchVerdict = 'reject' | 'breakout' | 'uncertain';
+
+export interface TouchPlan {
+  entry: number;
+  stop: number;
+  tp: number;
+  rr: number;
+}
+
+export interface TouchRead {
+  side: 'top' | 'bottom';
+  /** 反转方向：顶 = -1（做空），底 = +1（做多） */
+  dir: 1 | -1;
+  level: number;
+  /** 触及那一根（最逼近/刺破关键位） */
+  testIdx: number;
+  kind: TouchKind;
+  /** 刺破关键位的深度（ATR）：>0 越过；<0 尚未触及 */
+  depthAtr: number;
+  /** 接近段（触及前 5 根）订单流，ratio 为原始符号（买入为正） */
+  approach: FlowWindow;
+  /** 突破方向的主动成交压力 −1..1（>0 = 突破方占优） */
+  pressure: number;
+  bar: { deltaRatio: number; volRatio: number; wick: number; known: boolean };
+  /** 给评分模型的证据 −1..1（>0 = 假突破/被拒绝） */
+  evidence: number;
+  /** 假突破（被拒绝）概率：顶 = 回落概率，底 = 反弹概率 */
+  fakeProb: number;
+  /** 真突破概率 */
+  breakProb: number;
+  verdict: TouchVerdict;
+  reasons: string[];
+  headline: string;
+  /** 触及即反手的交易计划（突破已被接受时为 null） */
+  plan: TouchPlan | null;
+}
+
+const logistic = (x: number) => 1 / (1 + Math.exp(-x));
+const roundPx = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(v >= 1000 ? 2 : 6)) : 0);
+
+export function readTouch(
+  ctx: Ctx,
+  level: { price: number; side: 'top' | 'bottom'; idx?: number },
+  idx: number,
+  testIdx?: number,
+): TouchRead {
+  const { cs, n, atr, delta, vols, volMa } = ctx;
+  const i = Math.max(0, Math.min(idx, n - 1));
+  const a = Math.max(atr[i] || 0, 1e-9);
+  const top = level.side === 'top';
+  const dir: 1 | -1 = top ? -1 : 1;
+  const up = top ? 1 : -1; // 突破方向（顶 = 向上）
+  const px = level.price;
+  const over = (v: number) => (top ? v - px : px - v) / a; // >0：越过关键位
+
+  let t = Math.max(0, Math.min(testIdx ?? i, n - 1));
+  if (testIdx == null) {
+    for (let q = Math.max(0, i - 5); q <= i; q++) if (top ? cs[q].h > cs[t].h : cs[q].l < cs[t].l) t = q;
+  }
+  const tb = cs[t];
+  const depth = over(top ? tb.h : tb.l);
+  const approach = windowFlow(ctx, Math.max(0, t - 4), t);
+  const wide = windowFlow(ctx, Math.max(0, t - 12), t);
+  const after = i > t ? windowFlow(ctx, t + 1, i) : null;
+  const tvol = vols[t];
+  const tRatio = tvol > 0 ? delta[t] / tvol : 0;
+  const tVol = volMa[t] > 0 ? tvol / volMa[t] : 1;
+  const range = Math.max(1e-9, tb.h - tb.l);
+  const wick = top ? (tb.h - Math.max(tb.o, tb.c)) / range : (Math.min(tb.o, tb.c) - tb.l) / range;
+  const known = ctx.real[t] === 1;
+  const inside = over(tb.c) <= 0.05;
+  let beyondCloses = 0;
+  for (let q = t; q <= i; q++) if (over(cs[q].c) > 0.1) beyondCloses++;
+  const accepted = over(cs[i].c) > 0.2 || beyondCloses >= 2;
+  const near = depth > -0.5;
+
+  const pressure = clampR(approach.ratio * up * 4);
+  const thrust = clamp01((approach.volRatio - 1.2) / 1.0) * clamp01(pressure * 1.5);
+  const e1 = clampR(-pressure - 0.6 * thrust);
+  let e2 = 0;
+  if (inside && tVol >= 1.1 && tRatio * up <= 0.05) e2 = 0.8;
+  else if (inside && tVol < 0.9) e2 = 0.4;
+  else if (!inside && tRatio * up > 0.1 && tVol >= 1.2) e2 = -0.9;
+  else if (!inside) e2 = -0.3;
+  const e3 = near ? clampR((wick - 0.3) * 2) : 0;
+  const e4 = clampR(-wide.ratio * up * 5);
+  const e5 = after ? clampR(-after.ratio * up * 4) : null;
+  const wsum = 0.3 + 0.25 + 0.12 + 0.13 + (e5 == null ? 0 : 0.2);
+  let ev = (0.3 * e1 + 0.25 * e2 + 0.12 * e3 + 0.13 * e4 + (e5 == null ? 0 : 0.2 * e5)) / wsum;
+  if (accepted) ev = Math.min(ev, -0.6);
+  ev = clampR(ev * 1.6);
+
+  const buy = top ? '主动买入' : '主动卖出'; // 突破方
+  const sell = top ? '主动卖出' : '主动买入'; // 反转方
+  const word = top ? '前高' : '前低';
+  const src = known ? '' : '（近似）';
+  const reasons: string[] = [];
+  if (accepted) reasons.push(`收盘已站在${word}外侧（${beyondCloses} 根）：突破被接受`);
+  if (depth > 0.05 && !accepted) reasons.push(`刺破${word} ${depth.toFixed(2)} ATR${inside ? '后收回' : '，尚未收回'}`);
+  if (pressure <= -0.15) reasons.push(`冲向${word}时${sell}已占优（${pct(approach.ratio * -up)}）：推进动能不在突破方${src}`);
+  else if (pressure < 0.2) reasons.push(`冲向${word}时${buy}偏弱（${pct(approach.ratio * up)}）：缺少突破动能${src}`);
+  else reasons.push(`冲向${word}的${buy}强劲（${pct(approach.ratio * up)}${thrust > 0.3 ? `，放量 ${approach.volRatio.toFixed(1)}x` : ''}）：存在真突破风险${src}`);
+  if (e2 >= 0.8) reasons.push(`触${word}那根放量 ${tVol.toFixed(1)}x 却收在位内、${buy}未占优：突破盘被吸收`);
+  else if (e2 > 0) reasons.push(`触${word}那根缩量 ${tVol.toFixed(1)}x 且收在位内：追价意愿不足`);
+  else if (e2 <= -0.9) reasons.push(`触${word}那根放量 ${tVol.toFixed(1)}x、${buy} ${pct(tRatio * up)} 且收在位外：突破方主导`);
+  if (near && wick >= 0.45) reasons.push(`触${word}那根${top ? '上' : '下'}影线占 ${Math.round(wick * 100)}%：拒绝明显`);
+  if (e4 > 0.3) reasons.push(`近 12 根累计${buy}没有跟上价格：CVD 背离`);
+  if (after && e5 != null && e5 > 0.25) reasons.push(`触及之后${sell}接管（${pct(-after.ratio * up)}）`);
+  else if (after && e5 != null && e5 < -0.25) reasons.push(`触及之后${buy}继续占优（${pct(after.ratio * up)}）`);
+
+  const fakeProb = clamp01(logistic(ev * 1.6));
+  const breakProb = 1 - fakeProb;
+  const kind: TouchKind = accepted ? 'accepted' : depth > 0.05 ? 'sweep' : depth > -0.35 ? 'touch' : 'approach';
+  const verdict: TouchVerdict = accepted ? 'breakout' : fakeProb >= 0.62 ? 'reject' : fakeProb <= 0.4 ? 'breakout' : 'uncertain';
+  const pc = Math.round(fakeProb * 100);
+  const act = top ? '做空' : '做多';
+  const tag = top ? '触顶' : '触底';
+  const headline = accepted
+    ? top
+      ? '收盘站上前高：真突破，不做空'
+      : '收盘跌破前低：真跌破，不做多'
+    : verdict === 'reject'
+      ? kind === 'approach'
+        ? `接近${word}：订单流偏向被拒绝（假突破 ${pc}%），触及后可${act}`
+        : `${tag}订单流：假突破概率 ${pc}% → 可${act}`
+      : verdict === 'breakout'
+        ? `${tag}订单流：突破概率 ${100 - pc}%（${buy}仍在推进），不抢${top ? '空' : '多'}`
+        : `${tag}订单流不明朗（假突破 ${pc}%）：等拒绝K或突破确认`;
+
+  let plan: TouchPlan | null = null;
+  if (!accepted) {
+    let ext = px;
+    for (let q = t; q <= i; q++) ext = top ? Math.max(ext, cs[q].h) : Math.min(ext, cs[q].l);
+    const entry = px + dir * 0.1 * a;
+    const stop = ext - dir * 0.75 * a;
+    const risk = Math.abs(entry - stop);
+    let neck = entry;
+    for (let q = Math.max(0, level.idx ?? i - 60); q <= i; q++) neck = top ? Math.min(neck, cs[q].l) : Math.max(neck, cs[q].h);
+    const dist = Math.min(Math.max(Math.abs(entry - neck), 1.2 * risk), 4 * risk);
+    if (risk > 0) plan = { entry: roundPx(entry), stop: roundPx(stop), tp: roundPx(entry + dir * dist), rr: Number((dist / risk).toFixed(1)) };
+  }
+
+  return {
+    side: level.side,
+    dir,
+    level: px,
+    testIdx: t,
+    kind,
+    depthAtr: r3(depth),
+    approach,
+    pressure: r3(pressure),
+    bar: { deltaRatio: r3(tRatio), volRatio: r3(tVol), wick: r3(wick), known },
+    evidence: r3(ev),
+    fakeProb: r3(fakeProb),
+    breakProb: r3(breakProb),
+    verdict,
+    reasons,
+    headline,
+    plan,
+  };
+}
+
+// ─── 触顶 / 触底历史统计：本图里同类触及，订单流判“拒绝”后到底兑现了多少 ───
+export interface TouchEvent {
+  idx: number;
+  ts: number;
+  price: number;
+  side: 'top' | 'bottom';
+  fakeProb: number;
+  /** reject = 12 根内先回撤 ≥1 ATR；break = 先收盘越过关键位；drift = 两者都没发生 */
+  outcome: 'reject' | 'break' | 'drift';
+}
+
+export interface TouchStats {
+  n: number;
+  reject: number;
+  /** 订单流判“假突破”（≥60%）的次数 / 其中被拒绝 */
+  hiN: number;
+  hiReject: number;
+  /** 订单流判“真突破”（≤45%）的次数 / 其中被拒绝 */
+  loN: number;
+  loReject: number;
+}
+
+export function scanTouches(ctx: Ctx, horizon = 12): { events: TouchEvent[]; stats: TouchStats } {
+  const { cs, n, atr } = ctx;
+  const events: TouchEvent[] = [];
+  const stats: TouchStats = { n: 0, reject: 0, hiN: 0, hiReject: 0, loN: 0, loReject: 0 };
+  for (const lv of findSwingLevels(ctx)) {
+    const top = lv.side === 'top';
+    const end = Math.min(lv.breakIdx ?? n - 1, n - 1 - horizon);
+    for (let q = lv.idx + 8; q <= end; q++) {
+      const a = atr[q];
+      if (!(a > 0)) continue;
+      const hit = top ? cs[q].h >= lv.price - 0.2 * a : cs[q].l <= lv.price + 0.2 * a;
+      if (!hit) continue;
+      const rd = readTouch(ctx, lv, q, q);
+      let outcome: TouchEvent['outcome'] = 'drift';
+      for (let k = q; k <= Math.min(n - 1, q + horizon); k++) {
+        const c = cs[k];
+        if (top ? c.c > lv.price + 0.2 * a : c.c < lv.price - 0.2 * a) {
+          outcome = 'break';
+          break;
+        }
+        if (top ? c.l <= lv.price - a : c.h >= lv.price + a) {
+          outcome = 'reject';
+          break;
+        }
+      }
+      events.push({ idx: q, ts: cs[q].ts, price: lv.price, side: lv.side, fakeProb: rd.fakeProb, outcome });
+      stats.n++;
+      if (outcome === 'reject') stats.reject++;
+      if (rd.fakeProb >= 0.6) {
+        stats.hiN++;
+        if (outcome === 'reject') stats.hiReject++;
+      } else if (rd.fakeProb <= 0.45) {
+        stats.loN++;
+        if (outcome === 'reject') stats.loReject++;
+      }
+      q += horizon; // 同一次触碰只计一次
+    }
+  }
+  return { events, stats };
+}
+
 // ─── 二次测试判读 ─────────────────────────────────────────────
 export type TrapKind = 'bullTrap' | 'bearTrap' | null;
 export type FlowSource = 'taker' | 'approx' | 'mixed';
@@ -138,6 +374,8 @@ export interface SecondTestRead {
   absorption: { count: number; breach: number };
   oi: { pct: number | null };
   trap: { kind: TrapKind; score: number; reasons: string[] };
+  /** 触顶/触底订单流：真突破还是假突破 */
+  touch: TouchRead;
   /** 订单流对反转方向的净倾向 0..1（未经校准，供未确认阶段参考） */
   lean: number;
   flowSource: FlowSource;
@@ -312,6 +550,7 @@ export function readSecondTest(ctx: Ctx, sig: ScanSignal): SecondTestRead {
     absorption: { count: absorb, breach },
     oi: { pct: oiPct == null ? null : r3(oiPct) },
     trap: { kind, score: r3(score), reasons },
+    touch: readTouch(ctx, { price: pv.level, side: top ? 'top' : 'bottom', idx: pv.first }, i, deepestIdx),
     lean: r3(lean),
     flowSource,
     headline,
