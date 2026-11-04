@@ -51,7 +51,9 @@ const priceSweep = approximated.visible.find(i => i.type === 'bullTrap');
 assert.ok(priceSweep, 'a price sweep may be optionally shown with explicit provenance');
 assert.equal(priceSweep.source, 'approx');
 assert.ok(priceSweep.title.includes('仅价格') && !priceSweep.title.includes('诱多'));
-assert.ok(approximated.payload.events.some(e => e.id.startsWith('bullTrap') && e.text.startsWith('≈ ')));
+// 诱多/诱空明细仍保留在侧栏，但图上由关键位判读统一给出结论，避免同一根 K 线重复标注。
+assert.ok(priceSweep.paint === false, 'trap detail stays in the sidebar, not painted twice');
+assert.ok(!approximated.payload.events.some(e => e.id.startsWith('bullTrap')), 'no duplicate trap marker on the canvas');
 assert.ok(approximated.visible.filter(i => i.type === 'deltaImpulse').every(i => i.title.includes('K 线量价') && !i.title.includes('主动买入') && !i.title.includes('主动卖出')));
 assert.ok(!approximated.visible.some(i => i.type === 'cvdDivergence'), 'OHLC approximation must never be presented as real CVD');
 console.log('PASS missing taker data remains price-only; optional proxy cannot masquerade as real flow');

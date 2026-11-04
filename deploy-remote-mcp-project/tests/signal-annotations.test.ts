@@ -14,10 +14,13 @@ const inverted = analyzeSignals(bottom, ms, prefs, annotationFlow(bottom, 0.85),
 assert.ok(analysis.items.some(i => i.type === 'doubleTop'), 'double-top fixture must produce a confirmed price structure');
 assert.ok(inverted.items.some(i => i.type === 'doubleBottom'), 'mirrored fixture must produce a confirmed price structure');
 assert.ok(analysis.items.some(i => i.type === 'deltaImpulse' && i.source === 'real'));
-const scenarioZone = analysis.items.find(i => i.type === 'keyLevelScenario');
-assert.ok(scenarioZone?.zone && scenarioZone.zone.lo < scenarioZone.zone.hi, 'recent M/W setup must project a visible key-level decision zone');
-assert.ok(scenarioZone.detail.length <= 3, 'scenario hover must stay concise');
-console.log('PASS price-only M/W detector, real taker imbalance and key-level decision zone');
+const call = analysis.items.find(i => i.type === 'keyLevelScenario');
+assert.ok(call, 'recent M/W must produce a key-level call');
+assert.ok(call.levels?.length === 1 && call.levels[0].label === true, 'the call is a labelled line on the key level');
+assert.equal(call.levels[0].price, call.price, 'label sits exactly on the level');
+assert.ok(call.levels[0].name.length > 0);
+assert.ok(call.detail[0].startsWith('结论：'), 'hover opens with the verdict (trap / pullback / bias)');
+console.log('PASS price-only M/W detector, real taker imbalance and labelled key-level verdict');
 
 const projected = projectSignals(analysis, prefs);
 assert.ok(projected.payload.events.length > 0);
@@ -32,6 +35,11 @@ const bare = projectSignals(analysis, { ...prefs, labels: false, geometry: false
 assert.equal(bare.payload.paths!.length, 0);
 assert.ok(bare.payload.events.every(e => !e.text));
 assert.ok(bare.payload.levels.every(l => !l.label));
+
+const painted = projectSignals(analysis, prefs).payload.events.filter(e => e.text);
+const paintedKeys = painted.map(e => `${e.ts}|${e.text}`);
+assert.equal(new Set(paintedKeys).size, paintedKeys.length, 'same bar + same wording paints only once');
+console.log('PASS 同一根 K 线的重复文案只绘制一次');
 console.log('PASS individual/master/label/geometry switches truly change layer payloads');
 
 const absent = analyzeSignals(top, ms, prefs, null, now);

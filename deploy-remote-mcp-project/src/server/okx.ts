@@ -1,5 +1,6 @@
 import { Candle, BookLevel } from "@/lib/types";
 import { barMs } from "@/lib/types";
+import { quoteVolumeFromRow } from "@/lib/okxVolume";
 
 const BASE = "https://www.okx.com";
 
@@ -42,22 +43,16 @@ async function okxGetRetry(
 }
 
 // 防御性解析：官方格式 [ts,o,h,l,c,vol,volCcy,volCcyQuote,(confirm)]
-function parseCandleRow(row: (string | number)[]): Candle | null {
+function parseCandleRow(row: (string | number)[], symbol: string): Candle | null {
   if (!Array.isArray(row) || row.length < 6) return null;
   const ts = Number(row[0]);
   const o = Number(row[1]);
   const h = Number(row[2]);
   const l = Number(row[3]);
   const c = Number(row[4]);
-  const vRaw = Number(row[5]);
-  if (![ts, o, h, l, c, vRaw].every(Number.isFinite)) return null;
+  if (![ts, o, h, l, c].every(Number.isFinite)) return null;
   if (!(h >= Math.max(o, c) - 1e-9 && l <= Math.min(o, c) + 1e-9)) return null;
-  // 永续 K 线的 vol 单位是"张"。统一换算成报价币成交额（USDT）：
-  // 优先用 volCcyQuote（OKX 已算好的成交额），回退到 volCcy × 收盘价，再回退到 vol × 收盘价
-  const quote = Number(row[7]);
-  const ccy = Number(row[6]);
-  const v = Number.isFinite(quote) && quote > 0 ? quote : Number.isFinite(ccy) && ccy > 0 ? ccy * c : vRaw * c;
-  return { ts, o, h, l, c, v: Number.isFinite(v) ? v : 0 };
+  return { ts, o, h, l, c, v: quoteVolumeFromRow(row, symbol) };
 }
 
 // ─── 实时拉取 ─────────────────────────────────────────────
@@ -73,7 +68,7 @@ export async function fetchCandlesLive(
   })) as (string | number)[][];
   const rows: Candle[] = [];
   for (const r of first ?? []) {
-    const c = parseCandleRow(r);
+    const c = parseCandleRow(r, symbol);
     if (c) rows.push(c);
   }
   if (rows.length === 0) throw new Error("empty candles");
@@ -102,7 +97,7 @@ export async function fetchCandlesLive(
     }
     for (const page of results) {
       for (const r of page ?? []) {
-        const c = parseCandleRow(r);
+        const c = parseCandleRow(r, symbol);
         if (c && c.ts < oldest) rows.push(c);
       }
     }

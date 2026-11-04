@@ -1,4 +1,5 @@
 import { Candle, BookLevel, barMs } from "./types";
+import { quoteVolumeFromRow } from "./okxVolume";
 
 export type FeedStatus = "connecting" | "live" | "poll" | "sim";
 
@@ -179,11 +180,7 @@ export class OKXFeed {
         if (!Array.isArray(data)) return;
         for (const r of data) {
           const close = Number(r[4]);
-          // 成交量统一换算为报价币成交额（USDT）：volCcyQuote 优先，其次 volCcy × 收盘价
-          const quote = Number(r[7]);
-          const ccy = Number(r[6]);
-          const v = Number.isFinite(quote) && quote > 0 ? quote : Number.isFinite(ccy) && ccy > 0 ? ccy * close : (Number(r[5]) || 0) * close;
-          const c: Candle = { ts: Number(r[0]), o: Number(r[1]), h: Number(r[2]), l: Number(r[3]), c: close, v: Number.isFinite(v) ? v : 0 };
+          const c: Candle = { ts: Number(r[0]), o: Number(r[1]), h: Number(r[2]), l: Number(r[3]), c: close, v: quoteVolumeFromRow(r, this.symbol) };
           if (![c.ts, c.o, c.h, c.l, c.c].every(Number.isFinite)) continue;
           this.cb.onCandle(c, String(r[8]) === "1");
         }

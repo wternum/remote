@@ -34,8 +34,9 @@ export function useFlow(symbol: string, timeframe: string, closedTs: number, old
     });
     const t = window.setTimeout(() => {
       // 已完整回填过：只刷新最新 1 页；否则回填到图表最早 K 线或保留边界
-      const pages = cached?.complete ? 1 : 16;
-      void syncFlow(symbol, period, { minTs: oldestTs || 0, maxPages: pages, oiPages: cached?.complete ? 1 : 12, bootstrapPages: 220, bootstrapBars: period === '5m' ? 8 : 4, signal: ac.signal }).finally(() => {
+      // 用 rubikComplete：tape bootstrap 完成不代表官方统计已回填
+      const pages = cached?.rubikComplete ? 1 : 16;
+      void syncFlow(symbol, period, { minTs: oldestTs || 0, maxPages: pages, oiPages: cached?.rubikComplete ? 1 : 12, bootstrapPages: 300, bootstrapBars: period === '5m' ? 12 : 6, signal: ac.signal }).finally(() => {
         if (alive) setState(s => ({ ...s, syncing: false }));
       });
     }, 400);

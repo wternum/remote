@@ -1,4 +1,5 @@
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, SymbolInfo } from '@luxalgo/vela';
+import { quoteVolumeFromRow } from '@/lib/okxVolume';
 
 // ─────────────────────────────────────────────────────────────
 //  OKX 永续 DataProvider：历史分页 REST + 公共 WebSocket 实时 K 线
@@ -68,12 +69,11 @@ const brandIcon = (base: string) => {
 
 const TICK: Record<string, number> = { BTC: 0.1, ETH: 0.01, SOL: 0.01 };
 
-function parseRow(r: (string | number)[]): OHLCV | null {
+function parseRow(r: (string | number)[], symbol: string): OHLCV | null {
   if (!Array.isArray(r) || r.length < 6) return null;
-  const [t, o, h, l, c, vol, volCcy, volQuote] = r.map(Number);
-  if (![t, o, h, l, c].every(Number.isFinite)) return null;
-  const v = Number.isFinite(volQuote) && volQuote > 0 ? volQuote : Number.isFinite(volCcy) && volCcy > 0 ? volCcy * c : (vol || 0) * c;
-  return { time: t, open: o, high: h, low: l, close: c, volume: Number.isFinite(v) ? v : 0 };
+  const [t, o, h, l, c] = r.map(Number);
+  if (![t, o, h, l, c].every(Number.isFinite) || !(h >= Math.max(o, c) && l <= Math.min(o, c))) return null;
+  return { time: t, open: o, high: h, low: l, close: c, volume: quoteVolumeFromRow(r, symbol) };
 }
 
 async function okxGet(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<(string | number)[][]> {
@@ -200,7 +200,7 @@ export class OKXProvider implements DataProvider {
       opts?.signal,
     );
     for (const r of first) {
-      const b = parseRow(r);
+      const b = parseRow(r, ticker);
       if (b) map.set(b.time, b);
     }
     emit();
@@ -218,7 +218,7 @@ export class OKXProvider implements DataProvider {
       if (!page.length) break;
       let added = 0;
       for (const r of page) {
-        const b = parseRow(r);
+        const b = parseRow(r, ticker);
         if (b && !map.has(b.time)) {
           map.set(b.time, b);
           added++;
@@ -260,7 +260,7 @@ export class OKXProvider implements DataProvider {
           if (msg.arg?.channel !== channel || !msg.data) return;
           const fresh: OHLCV[] = [];
           for (const r of msg.data) {
-            const b = parseRow(r);
+            const b = parseRow(r, ticker);
             if (b) {
               onBar(b);
               fresh.push(b);

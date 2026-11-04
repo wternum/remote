@@ -97,7 +97,7 @@ export default function SignalPanel({ store, ctx }: { store: SignalStore; ctx: W
                   </div>
                   {group === 'flow' && (
                     <p className={`sa-flow-note ${!state.flowSupported || prefs.allowApprox ? 'is-caution' : ''}`}>
-                      {!state.flowSupported ? '该周期无真实成交聚合；可切至 5m 等支持周期。' : prefs.allowApprox ? '≈ 为 K 线代理，不代表真实主动成交。' : '逐笔 taker 成交信号；非订单簿 OFI。'}
+                      {!state.flowSupported ? '该周期无真实成交聚合；可切至 5m 等支持周期。' : prefs.allowApprox ? '≈ 为 K 线代理，不代表真实主动成交。' : '双顶双底阶段看量价结构；主动买卖额仅作佐证，非订单簿 OFI，也不是胜率。'}
                     </p>
                   )}
                 </section>

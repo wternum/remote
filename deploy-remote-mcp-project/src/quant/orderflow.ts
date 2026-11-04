@@ -208,6 +208,8 @@ export function readTouch(
   const e5 = after ? clampR(-after.ratio * up * 4) : null;
   const wsum = 0.3 + 0.25 + 0.12 + 0.13 + (e5 == null ? 0 : 0.2);
   let ev = (0.3 * e1 + 0.25 * e2 + 0.12 * e3 + 0.13 * e4 + (e5 == null ? 0 : 0.2 * e5)) / wsum;
+  // 覆盖率加权：接近段订单流为近似时，证据向中性收缩（满覆盖时为 no-op）。
+  ev *= approach.known;
   if (accepted) ev = Math.min(ev, -0.6);
   ev = clampR(ev * 1.6);
 
@@ -405,8 +407,11 @@ export function readSecondTest(ctx: Ctx, sig: ScanSignal): SecondTestRead {
     totalVol += vols[q];
   }
   const norm = Math.max(1e-9, totalVol * 0.08);
-  const cvdDiv = clampR(((cvdSecond - cvdFirst) * dir) / norm);
-  const legDeltaDiff = clampR((leg2.ratio - leg1.ratio) * dir * 6);
+  // 覆盖率加权：ctx.delta 在无真实覆盖处混入 OHLC 近似。近似值不能以满置信度
+  // 进入 CVD/背离证据——覆盖不足时按真实覆盖比例缩放（满覆盖时为 no-op）。
+  const flowCov = Math.min(leg1.known, leg2.known);
+  const cvdDiv = clampR((((cvdSecond - cvdFirst) * dir) / norm) * flowCov);
+  const legDeltaDiff = clampR(((leg2.ratio - leg1.ratio) * dir * 6) * flowCov);
   const v1 = leg1.vol / Math.max(1, leg1.bars);
   const v2 = leg2.vol / Math.max(1, leg2.bars);
   const legVolRatio = v1 > 0 ? v2 / v1 : 1;

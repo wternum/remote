@@ -40,7 +40,9 @@ export interface FlowSnapshot {
   period: string;
   barMs: number;
   bars: Map<number, FlowBar>;
-  /** 最近逐笔（环形，上限 1200）：用于大单主动方向等实时因子（可选以兼容既有快照构造） */
+  /** 最近两根的独立逐笔聚合：避免新收盘 rubik 统计尚不完整时封锁 WS 更新。 */
+  tapeBars?: Map<number, FlowBar>;
+  /** 最近逐笔（环形，上限 5000）：用于大单主动方向等实时因子（可选以兼容既有快照构造） */
   recent?: FlowTrade[];
   /** 上次修复性回补时间，避免断线后频繁全量翻页 */
   repairedAt?: number;
@@ -50,6 +52,10 @@ export interface FlowSnapshot {
   oiFrom: number;
   updatedAt: number;
   complete: boolean;
+  /** rubik 官方统计是否已完整回填（与 tape bootstrap 独立；失败可重试） */
+  rubikComplete?: boolean;
+  /** 上次 rubik 同步失败时间（0 = 未失败）；用于失败冷却，避免无代理环境每 30s 空转 */
+  rubikFailedAt?: number;
   tape: { connected: boolean; trades: number; bootstrapped: boolean };
 }
 
@@ -100,6 +106,8 @@ function emptySnapshot(instId: string, period: string): FlowSnapshot {
     oiFrom: Infinity,
     updatedAt: 0,
     complete: false,
+    rubikComplete: false,
+    rubikFailedAt: 0,
     tape: { connected: false, trades: 0, bootstrapped: false },
   };
 }
@@ -151,37 +159,72 @@ export interface Trade {
 // Deduplication belongs to a snapshot, not the shared socket: every timeframe must
 // receive each trade once, including after releasing/reconnecting the socket.
 const seenBySnapshot = new WeakMap<FlowSnapshot, Set<number>>();
+const seenMaxBySnapshot = new WeakMap<FlowSnapshot, number>();
+// tradeId 近似时间有序：保留水位窗口，避免 seen 集合随会话时长无界增长（BTC 约 10–30 笔/秒）
+const SEEN_KEEP = 150_000;
+const SEEN_TRIM_AT = 250_000;
 export function aggregateFlowTrades(snap: FlowSnapshot, trades: Trade[], ctVal: number) {
   let seen = seenBySnapshot.get(snap);
   if (!seen) { seen = new Set<number>(); seenBySnapshot.set(snap, seen); }
+  let maxId = seenMaxBySnapshot.get(snap) ?? 0;
+  const recentStart = Math.floor(Date.now() / snap.barMs) * snap.barMs - 2 * snap.barMs;
   for (const t of trades) {
-    if (!(t.px > 0 && t.sz > 0) || !Number.isFinite(t.tradeId) || !Number.isFinite(t.ts)) continue;
+    if (!(t.px > 0 && t.sz > 0 && ctVal > 0) || !Number.isSafeInteger(t.tradeId) ||
+        !(t.ts > 0) || !Number.isFinite(t.ts) || (t.side !== 'buy' && t.side !== 'sell')) continue;
     if (seen.has(t.tradeId)) continue;
     seen.add(t.tradeId);
+    if (t.tradeId > maxId) maxId = t.tradeId;
     const ts = Math.floor(t.ts / snap.barMs) * snap.barMs;
     const notional = t.px * t.sz * ctVal;
-    let bar = snap.bars.get(ts);
-    if (!bar || bar.src === 'rubik') {
-      if (bar?.src === 'rubik') continue; // 官方统计优先
-      bar = { ts, buy: 0, sell: 0, src: 'tape', trades: 0 };
-      snap.bars.set(ts, bar);
+    if (!Number.isFinite(notional)) continue;
+    const current = snap.bars.get(ts);
+    if (current?.src === 'rubik' && ts < recentStart) continue; // 历史根仍以官方统计为准
+
+    let tapeBar: FlowBar;
+    if (ts >= recentStart) {
+      const tapeBars = (snap.tapeBars ??= new Map());
+      tapeBar = tapeBars.get(ts) ?? (current?.src === 'tape'
+        ? { ...current }
+        : { ts, buy: 0, sell: 0, src: 'tape', trades: 0 });
+      tapeBars.set(ts, tapeBar);
+      // 官方值在后一次同步时可能带回了 OI；不要在切回逐笔时丢失。
+      if (current?.oiContracts) tapeBar.oiContracts = current.oiContracts;
+      if (current?.oiUsd) tapeBar.oiUsd = current.oiUsd;
+    } else {
+      tapeBar = current?.src === 'tape' ? current : { ts, buy: 0, sell: 0, src: 'tape', trades: 0 };
     }
-    if (t.side === 'buy') bar.buy += notional;
-    else bar.sell += notional;
+    if (t.side === 'buy') tapeBar.buy += notional;
+    else tapeBar.sell += notional;
+    tapeBar.trades = (tapeBar.trades ?? 0) + 1;
+    if (!current || current.src === 'tape' || tapeBar.buy + tapeBar.sell > current.buy + current.sell) {
+      snap.bars.set(ts, tapeBar);
+    }
     const recent = (snap.recent ??= []);
     recent.push({ ts: t.ts, side: t.side, notional });
-    if (recent.length > 1200) recent.splice(0, recent.length - 1200);
-    bar.trades = (bar.trades ?? 0) + 1;
+    if (recent.length > 5000) {
+      const cutoff = Date.now() - 180_000;
+      let drop = 0;
+      while (drop < recent.length && recent[drop].ts < cutoff) drop++;
+      if (drop > 0) recent.splice(0, drop);
+      if (recent.length > 5000) recent.splice(0, recent.length - 5000);
+    }
     snap.tape.trades++;
     snap.from = Math.min(snap.from, ts);
     snap.to = Math.max(snap.to, ts);
+  }
+  if (snap.tapeBars) for (const ts of snap.tapeBars.keys()) if (ts < recentStart) snap.tapeBars.delete(ts);
+  seenMaxBySnapshot.set(snap, maxId);
+  if (seen.size > SEEN_TRIM_AT) {
+    const cutoff = maxId - SEEN_KEEP;
+    for (const id of seen) if (id < cutoff) seen.delete(id);
   }
 }
 
 const parseTrades = (rows: unknown[]): Trade[] =>
   (rows as { ts: string; px: string; sz: string; side: string; tradeId: string }[])
-    .map(r => ({ ts: Number(r.ts), px: Number(r.px), sz: Number(r.sz), side: (r.side === 'buy' ? 'buy' : 'sell') as 'buy' | 'sell', tradeId: Number(r.tradeId) }))
-    .filter(t => Number.isFinite(t.ts) && Number.isFinite(t.px) && Number.isFinite(t.sz) && Number.isFinite(t.tradeId));
+    .filter(r => r && (r.side === 'buy' || r.side === 'sell'))
+    .map(r => ({ ts: Number(r.ts), px: Number(r.px), sz: Number(r.sz), side: r.side as 'buy' | 'sell', tradeId: Number(r.tradeId) }))
+    .filter(t => t.ts > 0 && t.px > 0 && t.sz > 0 && Number.isSafeInteger(t.tradeId) && Number.isFinite(t.ts));
 
 interface Tape {
   instId: string;
@@ -238,11 +281,12 @@ function openTape(tape: Tape) {
       for (const s of tape.snaps) {
         aggregateFlowTrades(s, trades, ctVal);
         // Coalesce live ticks: refresh evidence/optional preview without a React render per trade.
+        // 250ms 与标注运行时的节流对齐：端到端延时从 ~1.5s 降到 ~0.25s。
         if (trades.length && !tape.rollover) {
           tape.rollover = setTimeout(() => {
             tape.rollover = null;
             tape.snaps.forEach(notify);
-          }, 1500);
+          }, 250);
         }
       }
     } catch {
@@ -327,6 +371,11 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
       if (ts + snap.barMs > Date.now()) continue;
       nonZero++;
       const prev = snap.bars.get(ts);
+      // 刚收盘根的 rubik 统计有管线延迟，可能仍是部分成交额；此时实时 tape
+      // 已聚合得更完整（总额更高）。用总额比较而非无条件覆盖，避免把完整
+      // 的实时 delta 锁死为不完整值。OI 合并在后续循环中仍会命中 prev。
+      const tapeTotal = prev && prev.src === 'tape' ? prev.buy + prev.sell : 0;
+      if (tapeTotal > buy + sell) continue;
       snap.bars.set(ts, { ts, buy, sell, oiContracts: prev?.oiContracts, oiUsd: prev?.oiUsd, src: 'rubik' });
       snap.from = Math.min(snap.from, ts);
       snap.to = Math.max(snap.to, ts);
@@ -387,13 +436,17 @@ export function syncFlow(
     cache.set(key, snap);
     const base = rubikBase();
     try {
-      if (base) {
+      // 失败冷却：无代理的静态环境里 rubik 恒失败，避免每 30s 重复全量翻页空转。
+      const rubikCooling = !!snap.rubikFailedAt && Date.now() - snap.rubikFailedAt < 5 * 60_000;
+      if (base && !rubikCooling) {
         // Official per-bar taker statistics. A failure here (rate limit, no
         // proxy in a static/Vite build) must not block the live trade tape.
         try {
           await syncRubik(snap, base, opts.minTs, opts.maxPages ?? 16, opts.oiPages ?? 12, opts.signal);
+          snap.rubikComplete = true;
           snap.complete = true;
         } catch (e) {
+          snap.rubikFailedAt = Date.now();
           if (!opts.signal?.aborted) console.warn('[订单流] rubik 统计不可用，改用逐笔成交：', e);
         }
       }
@@ -471,12 +524,15 @@ export function bigBiasOf(
 }
 
 /**
- * 该 K 线是否被真实主动成交完整覆盖：
- * rubik 统计直接可信；逐笔聚合要求聚合额 ≥ 85% 的 K 线成交量（排除中途接入的不完整 K 线）。
+ * 只有与同根 K 线报价币成交额一致时才称为完整主动成交：
+ * 官方 rubik 也可能在刚收盘后返回部分统计（实测 SOL 5m 为 92.17%）；
+ * 逐笔回补允许少量网络缺口，但不接受超过整根 K 线总额的错单位/重复数据。
+ * 无有效 K 线成交额时无法证明覆盖，不能把缺失当作完整。
  */
 export function hasRealFlow(bar: FlowBar | undefined, candleVol?: number): bar is FlowBar {
-  if (!bar || !(bar.buy > 0 || bar.sell > 0)) return false;
-  if (bar.src === 'rubik') return true;
-  if (candleVol == null || !(candleVol > 0)) return true;
-  return bar.buy + bar.sell >= 0.85 * candleVol;
+  if (!bar || !Number.isFinite(bar.buy) || !Number.isFinite(bar.sell) ||
+      bar.buy < 0 || bar.sell < 0 || !(bar.buy + bar.sell > 0) ||
+      candleVol == null || !Number.isFinite(candleVol) || !(candleVol > 0)) return false;
+  const coverage = (bar.buy + bar.sell) / candleVol;
+  return coverage >= (bar.src === 'rubik' ? 0.95 : 0.85) && coverage <= 1.1;
 }
