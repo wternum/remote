@@ -273,7 +273,7 @@ export default function FlowRead({ ctx, rows, closedTs, threshold, lastPx, barMs
               />
               <Row k="关键位吸收" v={`${read.absorption.count} 根吸收 / ${read.absorption.breach} 根击穿`} tone={read.absorption.count > read.absorption.breach ? color : MUT} />
               <Row k="确认K主动差" v={`${pct(read.confirm.deltaRatio)}${read.confirm.known ? '' : '（近似）'} · 量 ${fmt(read.confirm.volRatio, 1)}x`} tone={read.confirm.deltaRatio * read.dir > 0.05 ? color : MUT} />
-              <Row k="第二腿持仓变化" v={read.oi.pct == null ? '无数据' : pct(read.oi.pct, 2)} tone={read.oi.pct != null && read.oi.pct > 0.003 ? AMBER : MUT} />
+              <Row k="第二腿持仓变化（张）" v={read.oi.pct == null ? '无数据' : pct(read.oi.pct, 2)} tone={read.oi.pct != null && read.oi.pct > 0.003 ? AMBER : MUT} />
             </div>
             {(read.touch.reasons.length > 0 || read.trap.reasons.length > 0) && (
               <ul className="tp-of-reasons">
@@ -331,7 +331,7 @@ export default function FlowRead({ ctx, rows, closedTs, threshold, lastPx, barMs
                 tone={r.pullback.started ? (r.pullback.volRatio <= 0.8 ? LONG : SHORT) : MUT}
               />
               <Row k={up ? '回踩关键位' : '反抽关键位'} v={r.pullback.failed ? '收盘跌回 · 失败' : r.pullback.held ? '触及并守住' : r.pullback.touched ? '触及 · 等确认K' : '未触及'} tone={r.pullback.failed ? AMBER : r.pullback.held ? LONG : MUT} />
-              <Row k="突破段持仓" v={r.oiPct == null ? '无数据' : pct(r.oiPct, 2)} tone={MUT} />
+              <Row k="突破段持仓（张）" v={r.oiPct == null ? '无数据' : pct(r.oiPct, 2)} tone={MUT} />
               <Row
                 k="本图历史"
                 v={stats ? `突破即追 ${chase == null ? '样本不足' : `${Math.round(chase * 100)}% (${stats.chase.n})`} · 等回踩 ${stats.buckets.retest_hold.n ? `${Math.round((stats.buckets.retest_hold.win / stats.buckets.retest_hold.n) * 100)}% (${stats.buckets.retest_hold.n})` : '样本不足'}` : '—'}

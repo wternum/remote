@@ -522,7 +522,10 @@ export function simulateWithPlan(
   void atr;
   return {
     filled: true,
-    why: why === 'be' ? (r > 0 ? 'be' : 'sl') : why,
+    // `be` describes the exit mechanism, not the sign of the final R.
+    // Fees/slippage can make a break-even stop slightly negative; reclassifying
+    // it as `sl` corrupts tp/sl/time/be statistics.
+    why,
     entryPrice: r6(entryPrice),
     entryTs,
     exitPrice: r6(exitAdj),

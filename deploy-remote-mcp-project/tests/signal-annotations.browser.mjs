@@ -84,12 +84,14 @@ const assertRowInsets = async (selector, vertical) => {
       top: Math.min(...children.map(r => r.top)) - box.top,
       bottom: box.bottom - Math.max(...children.map(r => r.bottom)),
       overflow: el.scrollWidth > el.clientWidth,
+      radius: Number.parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0,
     };
   });
   assert.ok(insets.left >= 11.5, `${selector}: left content inset must be at least 12px: ${JSON.stringify(insets)}`);
   assert.ok(insets.right >= 11.5, `${selector}: right content inset must be at least 12px: ${JSON.stringify(insets)}`);
   assert.ok(insets.top >= vertical - 0.5 && insets.bottom >= vertical - 0.5, `${selector}: vertical content inset must be at least ${vertical}px: ${JSON.stringify(insets)}`);
   assert.equal(insets.overflow, false, `${selector}: padded content must not overflow`);
+  assert.ok(insets.radius >= 8, `${selector}: hover surface must have rounded corners (>=8px): ${JSON.stringify(insets)}`);
 };
 
 try {
@@ -99,11 +101,13 @@ try {
   assert.equal(await page.getByRole('button', { name: '交易', exact: true }).count(), 0);
   const priceGroup = page.locator('.sa-group[aria-label="价格结构"]');
   const tradeGroup = page.locator('.sa-group[aria-label="逐笔订单流"]');
-  await expect(priceGroup.locator('.sa-type')).toHaveCount(4);
-  await expect(tradeGroup.locator('.sa-type')).toHaveCount(5);
+  await expect(priceGroup.locator('.sa-type')).toHaveCount(5);
+  await expect(tradeGroup.locator('.sa-type')).toHaveCount(6);
   assert.equal(await priceGroup.locator('[data-signal-type="retest"]').count(), 1, 'price retest must not be misrepresented as trade-flow OFI');
+  assert.equal(await priceGroup.locator('[data-signal-type="smartMoney"]').count(), 1, 'SMC structure context belongs with price observations');
   assert.equal(await tradeGroup.locator('[data-signal-type="keyLevelFlow"]').count(), 1, 'key-level taker context belongs with trade-flow observations');
   assert.equal(await tradeGroup.locator('[data-signal-type="cvdDivergence"]').count(), 1);
+  assert.equal(await tradeGroup.locator('[data-signal-type="keyLevelScenario"]').count(), 1, 'key-level decision zone must be independently switchable');
   await expect(page.locator('.sa-flow-note')).toContainText('非订单簿 OFI');
   await capture();
   // The runtime skips identical payloads. Explicitly hide then show so the observer
@@ -112,8 +116,9 @@ try {
   await expect.poll(async () => (await canvasInk()).reduce((s, n) => s + n, 0)).toBe(0);
   await page.getByRole('button', { name: '全部开启', exact: true }).click();
   await expect.poll(() => page.evaluate(() => !!window.__signalTestPayload?.events.some(e => e.id.startsWith('pattern:')))).toBe(true);
+  await expect.poll(() => page.evaluate(() => !!window.__signalTestPayload?.zones.some(z => z.id.startsWith('scenario:')))).toBe(true);
   await expect.poll(async () => (await canvasInk()).reduce((s, n) => s + n, 0)).toBeGreaterThan(0);
-  pass('原生标注侧栏可见，旧交易入口未恢复，真实画布有标记像素');
+  pass('原生标注侧栏可见，双顶/双底关键位剧本区进入真实画布');
 
   const layout = await page.evaluate(() => {
     const panel = document.querySelector('.sa-panel');
@@ -215,8 +220,8 @@ try {
   await capture();
   await page.evaluate(() => window.__velaWs.chart.setMarket({ symbol: 'okx:ETH-USDT-SWAP', timeframe: '5' }));
   await expect.poll(async () => (await meta()).signalMarket, { timeout: 30000 }).toBe('ETH-USDT-SWAP|5');
-  await expect.poll(() => page.evaluate(() => window.__signalTestPayload?.events.some(e => e.text === 'W 双底')), { timeout: 30000 }).toBe(true);
-  assert.ok(await page.evaluate(() => !window.__signalTestPayload.events.some(e => e.text === 'M 双顶')));
+  await expect.poll(() => page.evaluate(() => window.__signalTestPayload?.events.some(e => e.text === '双底')), { timeout: 30000 }).toBe(true);
+  assert.ok(await page.evaluate(() => !window.__signalTestPayload.events.some(e => e.text === '双顶')));
   pass('切换币种清除旧标注并重新识别当前市场');
 
   await page.evaluate(() => window.__velaWs.chart.setMarket({ symbol: 'okx:ETH-USDT-SWAP', timeframe: '1' }));

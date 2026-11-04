@@ -11,7 +11,7 @@ export interface Ctx {
   delta: number[];
   /** 每根 delta 是否来自真实主动成交 */
   real: Uint8Array;
-  /** 持仓量（USD 名义），无数据为 NaN */
+  /** 持仓量（优先合约张数；旧快照才回退 USD），无数据为 NaN */
   oi: number[];
   vols: number[];
   ema20: number[];
@@ -52,7 +52,11 @@ export function buildContext(cs: Candle[], flow?: FlowSnapshot | null): Ctx {
     } else {
       delta[i] = approxDeltaAt(cs, i);
     }
-    if (fb?.oiUsd && fb.oiUsd > 0) oi[i] = fb.oiUsd;
+    // Contract count measures position creation/closure without mixing in
+    // price movement.  Keep the USD fallback only for legacy in-memory/test
+    // snapshots created before oiContracts was introduced.
+    const position = fb?.oiContracts && fb.oiContracts > 0 ? fb.oiContracts : fb?.oiUsd;
+    if (position && position > 0) oi[i] = position;
     vols[i] = cs[i].v;
     index.set(cs[i].ts, i);
   }

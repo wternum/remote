@@ -232,8 +232,14 @@ export function useEngine(open: boolean) {
     if (!pool.length) return empty;
     pool.sort((a, b) => b.ts - a.ts);
     const row = pool[0];
-    const ageBars = Math.round(Math.max(0, (payload.lastTs - row.ts) / (payload.barMs || 300_000)));
-    return { row, ageBars, fresh: !!row.live, expired: ageBars > payload.maxHold };
+    // bar=ALL mixes 5m and 15m candidates.  A single response-level barMs /
+    // maxHold (currently taken from the last timeframe) cannot describe every
+    // row: using 15m for a 5m signal understates its age by 3x and expires it
+    // after 48 rather than 96 bars.
+    const rowBarMs = row.bar ? (row.bar === '15m' ? 900_000 : 300_000) : (payload.barMs || 300_000);
+    const rowMaxHold = row.bar ? (row.bar === '15m' ? 48 : 96) : payload.maxHold;
+    const ageBars = Math.round(Math.max(0, (payload.lastTs - row.ts) / rowBarMs));
+    return { row, ageBars, fresh: !!row.live, expired: ageBars > rowMaxHold };
   }, [payload, cfg.entryMode]);
 
   return {

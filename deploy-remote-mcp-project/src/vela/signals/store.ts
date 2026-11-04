@@ -3,15 +3,18 @@ import type { AnnEvent, AnnLevel, AnnPayload, AnnTone, AnnZone } from '../annotT
 export const SIGNAL_PANEL_ID = 'pulsedesk-signals';
 export const SIGNAL_STORAGE_KEY = 'pulsedesk.signal-annotations.v1';
 export const SIGNAL_TYPES = [
-  { id: 'doubleTop', name: '双顶', en: 'Double top', group: 'structure', color: '#f58b9a', description: '已确认的 M 型二次测试收盘拒绝', rule: '只用已收盘价格、ATR 和左 8 / 右 5 根确认摆动点；两次测试相隔至少 8 根、颈线高度至少 2 ATR。图上识别不受交易手续费、止损空间或盈亏比过滤，不代表可执行交易。' },
-  { id: 'doubleBottom', name: '双底', en: 'Double bottom', group: 'structure', color: '#65d6ad', description: '已确认的 W 型二次测试收盘拒绝', rule: '与双顶镜像对称；等待已确认摆动底、第二次测试与收盘拒绝。使用 ATR 容差（最多 0.7 ATR），不以历史交易胜率或未来 K 线修订信号。' },
-  { id: 'keyLevels', name: '支撑 / 阻力', en: 'Key levels', group: 'structure', color: '#91adf8', description: '当前尚未收盘突破的摆动价位', rule: '左 8 / 右 5 根已收盘 K 线确认摆动点；保留最近 288 根内未收盘突破的价位，按现价距离排序最多 8 条。' },
-  { id: 'retest', name: '突破回踩', en: 'Breakout & retest', group: 'structure', color: '#e4c17c', description: '价格突破后首次回踩并收盘守住', rule: '价格结构信号：关键位收盘突破后回踩、再次收盘守住才标注；事件时间是首次确认那根。只有突破 K 与回踩确认 K 均有真实 taker 成交、方向不冲突时才额外提供成交佐证；否则不冒充订单流确认。' },
-  { id: 'keyLevelFlow', name: '关键位成交反应', en: 'Key-level taker flow', group: 'flow', color: '#7dd3fc', description: '双顶/双底第二次测试处的真实 taker 买卖差与覆盖', rule: '只附属于已确认的 M/W 第二次测试。测试 K 或确认 K 至少一根具备完整真实逐笔覆盖（聚合 ≥ K 线成交额 85%）才显示；详情列出两根的 B/S 名义额、(B−S)/(B+S)、覆盖率、扫位深度和收盘结果。两条推进腿完整连续覆盖时才比较推进强弱。它是成交观察，不是订单簿 OFI，也不输出胜率。' },
-  { id: 'bullTrap', name: '诱多候选', en: 'High sweep / reclaim', group: 'flow', color: '#f4a073', description: '扫高收回且测试／确认 K 有真实成交证据', rule: '须二次测试刺破前高并收回；真实标注还须测试与确认 K 都有完整 taker 成交，且反转侧主动成交接管或追多成交放量未能守住。看不到具体止损单，故只称“候选”。手动开启近似时，仅显示 ≈ 扫高收回（价格），不声称观察到主动买卖。' },
-  { id: 'bearTrap', name: '诱空候选', en: 'Low sweep / reclaim', group: 'flow', color: '#71d5c7', description: '扫低收回且测试／确认 K 有真实成交证据', rule: '双底镜像：须扫低后收盘收回，且测试／确认 K 的真实 taker 成交满足反转或放量追空未续。无完整逐笔覆盖时只允许明确标为 ≈ 价格代理；不能据此声称止损真的触发。' },
-  { id: 'cvdDivergence', name: 'CVD 背离', en: 'Taker CVD divergence', group: 'flow', color: '#ba9cfa', description: '二次测试时连续真实主动成交累计量未确认极值', rule: '一顶/底至二次测试之间的每根 K 线都需要完整真实 taker 买卖成交；累计净主动成交变化与价格二次测试方向相背才标注。缺任一根即不拼接 OHLC 代理，也不输出 CVD 背离。' },
-  { id: 'deltaImpulse', name: '主动成交异动', en: 'Taker trade imbalance', group: 'flow', color: '#73c5e7', description: '真实 taker 买卖差显著且成交量放大', rule: '完整成交覆盖下，K 线成交额 ≥ 前 20 根均量的 1.5 倍，|真实 taker 买卖差 / 实际成交额| ≥ 25%。阈值是未校准的工程观察值，不代表预测胜率；打开近似后可另看 ≈ K 线量价代理，绝不称真实主动成交。' },
+  { id: 'doubleTop', name: '双顶', en: 'Double top', group: 'structure', color: '#f58b9a', description: '价格两次冲到同一个位置都没上去，第二次收盘又被压下来，就在这里标一下。', rule: '只用已收盘价格、ATR 和左 8 / 右 5 根确认摆动点；两次测试相隔至少 8 根、颈线高度至少 2 ATR。图上识别不受交易手续费、止损空间或盈亏比过滤，不代表可执行交易。' },
+  { id: 'doubleBottom', name: '双底', en: 'Double bottom', group: 'structure', color: '#65d6ad', description: '价格两次跌到同一个位置都被买回来，第二次收盘站住，就在这里标一下。', rule: '与双顶镜像对称；等待已确认摆动底、第二次测试与收盘拒绝。使用 ATR 容差（最多 0.7 ATR），不以历史交易胜率或未来 K 线修订信号。' },
+  { id: 'keyLevels', name: '支撑 / 阻力', en: 'Key levels', group: 'structure', color: '#91adf8', description: '最近被反复摸过、还没真正跌破/涨破的价位，画出注意带。', rule: '左 8 / 右 5 根已收盘 K 线确认摆动点；保留最近 288 根内未收盘突破的价位，按现价距离排序最多 8 条。' },
+  { id: 'retest', name: '突破回踩', en: 'Breakout & retest', group: 'structure', color: '#e4c17c', description: '价格突破一条线后第一次回来，并且收盘站住，才标。', rule: '价格结构信号：关键位收盘突破后回踩、再次收盘守住才标注；事件时间是首次确认那根。只有突破 K 与回踩确认 K 均有真实 taker 成交、方向不冲突时才额外提供成交佐证；否则不冒充订单流确认。' },
+  { id: 'smartMoney', name: '聪明钱结构', en: 'Key-level SMC context', group: 'structure', color: '#c8a2f8', description: '关键位旁边有没有反复被摸、破结构、留下没补的缺口', rule: '在双顶/双底的关键位旁边看四件事：这里是不是反复被摸过、有没有破过结构、有没有留下没补的价格缺口、是不是刚有一根反向 K 线被越过。默认关闭，避免图上太乱。只讲看到的价格事实，不猜机构身份，命中数量不是胜率。' },
+  { id: 'keyLevelScenario', name: '关键位剧本区', en: 'Double-test reaction zone', group: 'flow', color: '#e9b86e', description: '关键价位现在是什么状态：假动作、真破、破完回抽到哪了', rule: '只用大白话说明白三件事：现在是不是假动作、有没有真破、破了之后回抽到了没有。每个方向最多一块区，全图最多 3 块，同价位只留一块。' },
+
+  { id: 'keyLevelFlow', name: '关键位成交反应', en: 'Key-level taker flow', group: 'flow', color: '#7dd3fc', description: '双顶/双底那两根 K 线里，谁在出力：买方多还是卖方多。没有逐笔数据就不标方向。', rule: '只附属于已确认的 M/W 第二次测试。测试 K 或确认 K 至少一根具备完整真实逐笔覆盖（聚合 ≥ K 线成交额 85%）才显示；详情列出两根的 B/S 名义额、(B−S)/(B+S)、覆盖率、扫位深度和收盘结果。两条推进腿完整连续覆盖时才比较推进强弱。它是成交观察，不是订单簿 OFI，也不输出胜率。' },
+  { id: 'bullTrap', name: '诱多候选', en: 'High sweep / reclaim', group: 'flow', color: '#f4a073', description: '冲上去又掉回来，追高的人被套住的样子（要有真实成交佐证）。', rule: '须二次测试刺破前高并收回；真实标注还须测试与确认 K 都有完整 taker 成交，且反转侧主动成交接管或追多成交放量未能守住。看不到具体止损单，故只称“候选”。手动开启近似时，仅显示 ≈ 扫高收回（价格），不声称观察到主动买卖。' },
+  { id: 'bearTrap', name: '诱空候选', en: 'Low sweep / reclaim', group: 'flow', color: '#71d5c7', description: '跌下去又拉回来，追空的人被套住的样子（要有真实成交佐证）。', rule: '双底镜像：须扫低后收盘收回，且测试／确认 K 的真实 taker 成交满足反转或放量追空未续。无完整逐笔覆盖时只允许明确标为 ≈ 价格代理；不能据此声称止损真的触发。' },
+  { id: 'cvdDivergence', name: 'CVD 背离', en: 'Taker CVD divergence', group: 'flow', color: '#ba9cfa', description: '价格创新高/新低，但一路累积的主动买卖力量没跟上。需要连续逐笔数据。', rule: '一顶/底至二次测试之间的每根 K 线都需要完整真实 taker 买卖成交；累计净主动成交变化与价格二次测试方向相背才标注。缺任一根即不拼接 OHLC 代理，也不输出 CVD 背离。' },
+  { id: 'deltaImpulse', name: '成交力度', en: 'Taker effort vs result', group: 'flow', color: '#73c5e7', description: '放量的 K 线里，谁在出力、价格跟没跟', rule: '放量的 K 线会标一句人话：卖得猛 / 买得猛（一边倒）、跌不下去 / 涨不上去（力气大但价格没跟着走）、爆量（买卖两边都很大）。图上最多只画 4 个最重要的，其余在侧栏列表里。必须用真实逐笔成交，没有数据就不猜方向。' },
 ] as const;
 export type SignalType = (typeof SIGNAL_TYPES)[number]['id'];
 export type SignalSource = 'price' | 'real' | 'mixed' | 'approx';
@@ -28,7 +31,7 @@ export interface SignalPreferences {
 }
 export const DEFAULT_PREFERENCES: SignalPreferences = {
   enabled: true,
-  selected: { doubleTop: true, doubleBottom: true, keyLevels: true, bullTrap: true, bearTrap: true, cvdDivergence: false, deltaImpulse: true, retest: false, keyLevelFlow: true },
+  selected: { doubleTop: true, doubleBottom: true, keyLevels: true, smartMoney: false, keyLevelScenario: true, bullTrap: true, bearTrap: true, cvdDivergence: false, deltaImpulse: true, retest: false, keyLevelFlow: true },
   labels: true,
   geometry: true,
   allowApprox: false,
@@ -51,6 +54,11 @@ export interface SignalItem {
   levels?: AnnLevel[];
   zone?: AnnZone;
   path?: { points: { ts: number; price: number }[]; tone: AnnTone };
+  /**
+   * false = 只在侧栏「最近标记」里列出，不画到图上。
+   * 用于放量 K 线这类高频事件：全部保留在列表，画布只画最重要的几个。
+   */
+  paint?: boolean;
 }
 export const emptyCounts = (): Record<SignalType, number> => Object.fromEntries(SIGNAL_TYPES.map(t => [t.id, 0])) as Record<SignalType, number>;
 export interface SignalRuntimeState {

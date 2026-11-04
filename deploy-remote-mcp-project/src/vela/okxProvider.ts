@@ -7,7 +7,10 @@ import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, Sym
 // ─────────────────────────────────────────────────────────────
 
 const REST = 'https://www.okx.com';
-const WS = 'wss://ws.okx.com:8443/ws/v5/business';
+// OKX's business endpoint on the default HTTPS port.  The legacy 8443
+// endpoint is unreliable/deprecated in some regions and left the chart on
+// historical REST data while the rest of the app used the 443 feed.
+const WS = 'wss://ws.okx.com/ws/v5/business';
 
 /** Vela 规范周期（分钟数 / 'D' / 'W' / 'M'）→ OKX bar 代号 */
 export function toOkxBar(tf: string): string {
@@ -79,6 +82,8 @@ async function okxGet(path: string, params: Record<string, string>, signal?: Abo
   for (let attempt = 0; attempt < 4; attempt++) {
     const res = await fetch(url.toString(), { signal, cache: 'no-store' });
     if (res.status === 429) {
+      // Do not turn rate limiting into a successful empty candle page.
+      if (attempt === 3) throw new Error('OKX rate limited (429)');
       await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       continue;
     }
@@ -136,15 +141,20 @@ export class OKXProvider implements DataProvider {
 
   async getSymbolInfo(ticker: string): Promise<SymbolInfo | undefined> {
     const base = ticker.split('-')[0];
+    const tick = TICK[base] ?? 0.01;
     return {
       ticker,
       description: SWAPS.find(s => s.ticker === ticker)?.description ?? ticker,
       type: 'swap',
       currency: 'USDT',
-      pricescale: Math.round(1 / (TICK[base] ?? 0.01)),
+      // Vela's price axis reads `mintick`. Without it the axis falls back to a
+      // zoom-range formula, so a freshly loaded SOL chart can show only one
+      // decimal (e.g. 93.1 instead of 93.10) until the user zooms.
+      mintick: tick,
+      pricescale: Math.round(1 / tick),
       minmove: 1,
       timezone: 'Etc/UTC',
-    } as unknown as SymbolInfo;
+    } as SymbolInfo;
   }
 
   resolveSymbolIcon(symbol: SymbolDescriptor): string | undefined {

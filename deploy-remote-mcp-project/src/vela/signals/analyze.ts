@@ -1,14 +1,16 @@
 import type { Candle } from '@/lib/types';
 import { buildContext, type Ctx } from '@/quant/context';
 import type { FlowSnapshot } from '@/quant/flow';
-import { findSwingLevels, readBreakout } from '@/quant/orderflow';
+import { findSwingLevels, readBreakout, windowFlow } from '@/quant/orderflow';
+import { readSmartMoney } from '@/quant/smartmoney';
 import { decimalsFor, type AnnPayload, type AnnTone } from '../annotTypes';
-import { scanAnnotationPatterns, type AnnotationPattern } from './patterns';
+import { annotationTolerance, scanAnnotationPatterns, type AnnotationPattern } from './patterns';
+import { analyzeKeyLevelScenario, selectScenarios } from './scenario';
 import { emptyCounts, emptySignalPayload, SOURCE_LABELS, type SignalItem, type SignalPreferences, type SignalSource, type SignalType } from './store';
 
 const pct = (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
 const money = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(2)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0);
-const priceText = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: decimalsFor(n) });
+const priceText = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: decimalsFor(n), maximumFractionDigits: decimalsFor(n) });
 const priceAt = (cs: Candle[], i: number) => cs[i];
 const positive = (v: number) => Number.isFinite(v) && v > 0;
 
@@ -149,13 +151,12 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     const top = pattern.side === 'top';
     const type: SignalType = top ? 'doubleTop' : 'doubleBottom';
     const tone: AnnTone = top ? 'short' : 'long';
-    const label = top ? 'M 双顶' : 'W 双底';
+    const label = top ? '双顶' : '双底';
     const fromTs = priceAt(cs, first).ts;
     const key = `${type}:${fromTs}:${c.ts}`;
     const detail = [
       `首次摆动 ${priceText(level)} · 颈线 ${priceText(neck)}`,
       `二次测试 ${priceText(pattern.secondPrice)} · 收盘确认 ${priceText(c.c)}`,
-      '仅价格形态，不含交易成本、止损或胜率判断。',
     ];
     items.push({
       id: key, type, ts: c.ts, fromTs, price: level, title: label, detail, source: 'price', confirmed: true, tone,
@@ -212,15 +213,81 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
         '这是 OKX taker 成交观察，不是订单簿 OFI，也不证明止损单、仓位或被动挂单。',
       ];
       const shownRatio = (confirmObs ?? testObs)!.ratio;
+      const decisive = stance === '反转侧主动成交占优' || stance === '推进侧成交未能站稳';
+      // 这条标记的价值是「关键位当时谁在出力」，数字已经由成交力度标记展示，
+      // 这里避免再重复一个 Δ 标签。
+      const text = stance === '反转侧主动成交占优'
+        ? (top ? '卖方占优' : '买方占优')
+        : stance === '推进侧成交未能站稳'
+          ? (top ? '冲不上去' : '跌不下去')
+          : '';
+      void decisive;
       items.push({
         id: `keyflow:${key}`, type: 'keyLevelFlow', ts: c.ts, fromTs, price: level,
         title: `${label}关键位成交反应 · ${stance}`, detail, source: 'real', confirmed: true, tone: stance === '反转侧主动成交占优' || stance === '推进侧成交未能站稳' ? tone : 'neck',
         event: {
           id: `keyflow:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone: stance === '反转侧主动成交占优' || stance === '推进侧成交未能站稳' ? tone : 'neck',
-          text: `Δ ${pct(shownRatio)}`, marker: 'diamond', priority: 76,
+          text: text,
+          marker: 'diamond', priority: 76,
           title: `${label}关键位成交反应 · ${stance}`, detail,
         },
         levels: [{ id: `keyflow:${key}:level`, name: top ? '双顶关键位' : '双底关键位', fromTs, toTs: c.ts, price: level, tone: 'neck', style: 'dotted', rank: 'normal', priority: 54, label: false }],
+      });
+    }
+
+    // ── 聪明钱结构（SMC/ICT 中可验证、可编码的部分）──
+    // 只汇总价格结构事实；成交佐证要求该窗口 ≥95% 的真实逐笔覆盖。
+    const smcWindow = windowFlow(ctx, Math.max(0, second - 6), idx);
+    const smc = readSmartMoney(
+      ctx,
+      { side: top ? 'top' : 'bottom', idx, first, second, level, neck },
+      smcWindow,
+      smcWindow.known >= 0.95,
+    );
+    const ob = smc.orderBlock;
+    const alignedFvg = smc.fvgs.find(z => z.aligned && !z.filled) ?? null;
+    const swept = !!smc.liquidity?.swept && !!smc.liquidity.reclaimed;
+    const structureShift = !!smc.structure && smc.structure.dir === smc.dir && smc.structure.kind === 'CHOCH';
+    const meaningful = swept || structureShift || !!alignedFvg || (!!ob && !ob.mitigated);
+    if (smc.hits >= 2 && meaningful) {
+      const zone = ob && !ob.mitigated
+        ? { id: `smc:${key}:ob`, fromTs: priceAt(cs, ob.from).ts, toTs: c.ts, lo: ob.lo, hi: ob.hi, text: top ? '供应区' : '需求区' }
+        : alignedFvg
+          ? { id: `smc:${key}:fvg`, fromTs: priceAt(cs, alignedFvg.from).ts, toTs: c.ts, lo: alignedFvg.lo, hi: alignedFvg.hi, text: top ? '空头缺口' : '多头缺口' }
+          : null;
+      const f2 = (v: number) => priceText(v);
+      const short: Record<string, string> = {
+        liquiditySweep: smc.liquidity ? `扫流动性 ${f2(smc.liquidity.price)}（${smc.liquidity.touches} 次触及）` : '扫流动性',
+        structureShift: smc.structure ? `${smc.structure.kind} ${smc.structure.dir > 0 ? '向上' : '向下'} ${f2(smc.structure.price)}` : '结构转向',
+        fvg: alignedFvg ? `缺口 ${f2(alignedFvg.lo)}–${f2(alignedFvg.hi)}` : '同向缺口',
+        orderBlock: ob ? `${top ? '供应' : '需求'}区 ${f2(ob.lo)}–${f2(ob.hi)}` : '订单块',
+        premiumDiscount: `${smc.range.premium ? '溢价' : '折价'} ${(smc.range.position * 100).toFixed(0)}%`,
+        takerConfirm: smc.taker ? `taker Δ ${pct(smc.taker.window.ratio)}` : 'taker',
+      };
+      const lines = smc.evidence.filter(e => e.state === 'hit').map(e => `✓ ${short[e.key]}`);
+      const smcTitle = `${top ? '顶' : '底'} SMC ${smc.hits}/5 · 结构计数，非胜率`;
+      const strong = swept || (!!ob && !ob.mitigated);
+      items.push({
+        id: `smc:${key}`,
+        type: 'smartMoney',
+        ts: c.ts, fromTs, price: level,
+        title: smcTitle,
+        detail: lines,
+        source: smc.source, confirmed: true, tone: strong ? tone : 'neck',
+        event: {
+          id: `smc:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone: strong ? tone : 'neck',
+          text: `SMC ${smc.hits}/5`, marker: 'diamond', priority: 74,
+          title: smcTitle, detail: lines,
+        },
+        ...(zone
+          ? {
+              zone: {
+                id: zone.id, fromTs: zone.fromTs, toTs: zone.toTs, lo: zone.lo, hi: zone.hi,
+                tone: 'zone' as AnnTone, text: zone.text, priority: 66,
+                title: `${top ? '顶部' : '底部'}关键位结构区`, detail: lines.slice(0, 3),
+              },
+            }
+          : {}),
       });
     }
 
@@ -281,6 +348,17 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     }
   }
 
+  // Keep one evolving decision-zone read per side near the current market.
+  // Historical M/W markers remain immutable; this single item is the live
+  // status surface the chart uses for trap/break/retest zones.
+  // Every M/W in the last 288 bars is evaluated, so an older double bottom that
+  // was just broken (or a double top whose neck just gave way) is not hidden by
+  // a newer, quieter pattern. selectScenarios keeps at most 3 distinct prices.
+  const scenarioReads = patterns
+    .filter(p => p.idx >= Math.max(0, ctx.n - 289))
+    .map(pattern => analyzeKeyLevelScenario({ pattern, ctx, flow, barMs }));
+  items.push(...selectScenarios(scenarioReads, ctx.n));
+
   // Structural levels are independent of trade costs and order-flow availability.
   const current = cs.at(-1)!.c;
   const swings = findSwingLevels(ctx, { maxAge: 288 });
@@ -304,6 +382,10 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   const deltaCs = forming ? [...cs, forming] : cs;
   const deltaCtx = forming ? buildContext(deltaCs, flow) : ctx;
   const lastImpulse = { real: { index: -4, direction: 0 }, approx: { index: -4, direction: 0 } };
+  // Collect first, paint later: every qualifying candle used to get its own
+  // label, which turned a normal 5m chart into a wall of tags. The sidebar
+  // still lists every event; the canvas shows only the most important few.
+  const flowMarks: { item: SignalItem; score: number; idx: number }[] = [];
   for (let i = Math.max(20, deltaCtx.n - preferences.lookback); i < deltaCtx.n; i++) {
     const candle = deltaCtx.cs[i];
     const confirmed = candle.ts + barMs <= now;
@@ -312,31 +394,67 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     const denominator = real && fb ? fb.buy + fb.sell : candle.v;
     const ratio = denominator > 0 ? deltaCtx.delta[i] / denominator : 0;
     const volRatio = deltaCtx.volMa[i] > 0 ? candle.v / deltaCtx.volMa[i] : 0;
-    if (Math.abs(ratio) < 0.25 || volRatio < 1.5) continue;
+    const range = Math.max(candle.h - candle.l, 1e-12);
+    const closePos = (candle.c - candle.l) / range;
+    // 努力与结果：放量猛卖却收在高位 = 有人在接；反过来是有人在出。
+    const absorption = real && volRatio >= 2 && Math.abs(ratio) >= 0.15 &&
+      (ratio < 0 ? closePos >= 0.55 && candle.c >= candle.o : closePos <= 0.45 && candle.c <= candle.o);
+    const impulse = (Math.abs(ratio) >= 0.25 && volRatio >= 1.5) || (real && Math.abs(ratio) >= 0.12 && volRatio >= 2.5);
+    // 爆量：量极大但买卖接近均衡，说明双方都在大额成交（常见于插针/清算）。
+    const climax = real && !absorption && volRatio >= 4 && Math.abs(ratio) < 0.12;
+    if (!absorption && !impulse && !climax) continue;
     const direction = Math.sign(ratio);
     const source: 'real' | 'approx' = real ? 'real' : 'approx';
     const previous = lastImpulse[source];
-    if (direction === previous.direction && i - previous.index < 3) continue; // dedupe per source, never let an OHLC proxy mask a real taker event
+    if (!absorption && !climax && direction === previous.direction && i - previous.index < 3) continue;
     previous.index = i;
     previous.direction = direction;
     const buy = ratio > 0;
-    const tone = buy ? 'long' : 'short';
     const id = `delta:${candle.ts}`;
-    const title = real
-      ? `${buy ? '主动买入' : '主动卖出'}异动${confirmed ? '' : ' · 形成中'}`
-      : `K 线量价${buy ? '偏强' : '偏弱'}${confirmed ? '' : ' · 形成中'}`;
-    const detail = [
-      `数据来源：${SOURCE_LABELS[source]}`,
-      real ? `真实 taker 买卖差 / 实际成交额 ${pct(ratio)}` : `OHLC 收盘位置代理（不是主动买卖方向）${pct(ratio)}`,
-      `K 线量比 ${volRatio.toFixed(2)}×`,
-      confirmed ? 'K 线已收盘 · 仅为成交现象观察' : '未收盘预览，条件消失时撤销',
-    ];
-    items.push({ id, type: 'deltaImpulse', ts: candle.ts, fromTs: candle.ts, price: candle.c, title, detail, source, confirmed, tone,
-      event: { id, ts: candle.ts, side: buy ? 'below' : 'above', tone,
-        text: real ? `${buy ? 'Δ 买入' : 'Δ 卖出'}${confirmed ? '' : ' · 预览'}` : `${buy ? '量价偏强' : '量价偏弱'}${confirmed ? '' : ' · 预览'}`,
-        marker: 'diamond', priority: confirmed ? 62 : 40, title, detail },
+    const pv = `${pct(ratio).replace('.0%', '%')} · ${volRatio.toFixed(1)}×`;
+    const preview = confirmed ? '' : ' · 预览';
+    const tone: AnnTone = climax ? 'warn' : absorption ? (buy ? 'short' : 'long') : buy ? 'long' : 'short';
+    // 图上只放一句大白话；具体数字留给悬停。
+    const text = climax ? `爆量${preview}` : absorption ? `${buy ? '涨不上去' : '跌不下去'}${preview}` : real ? `${buy ? '买得猛' : '卖得猛'}${preview}` : `${buy ? '偏强' : '偏弱'}${preview}`;
+    const title = climax
+      ? `成交量突然放大 ${volRatio.toFixed(1)} 倍，买和卖都很多${preview}`
+      : absorption
+        ? `${buy ? '主动买入' : '主动卖出'}很多，价格却没跟着走${preview}`
+        : real
+          ? `这一根以${buy ? '主动买入' : '主动卖出'}为主（${pv}）${preview}`
+          : `K 线量价偏${buy ? '强' : '弱'}，方向靠收盘位置推测（${pv}）${preview}`;
+    const notional = real && fb ? `买 ${money(fb.buy)} / 卖 ${money(fb.sell)} USDT` : '没有逐笔数据，按收盘位置推测，不代表真实买卖方向';
+    const detail = [`${notional} · 量是近 20 根的 ${volRatio.toFixed(1)} 倍`];
+    if (climax) detail.push('买卖两边都很大，不是单边行情；看下一根能不能收在这根中间位置上方/下方。');
+    if (absorption) detail.push(`主动差 ${pct(ratio)}，但收在整根的 ${(closePos * 100).toFixed(0)}% 位置：力气没换成价格。`);
+    const score = climax ? 3.2 : absorption ? 2.6 : 1 + Math.min(3, Math.abs(ratio) * 3) + Math.min(1.5, volRatio / 4);
+    flowMarks.push({
+      idx: i,
+      score,
+      item: {
+        id, type: 'deltaImpulse', ts: candle.ts, fromTs: candle.ts, price: candle.c, title, detail, source, confirmed, tone,
+        event: {
+          id, ts: candle.ts,
+          side: climax ? (candle.c < candle.o ? 'below' : 'above') : absorption ? (buy ? 'above' : 'below') : buy ? 'below' : 'above',
+          tone, text, marker: 'diamond', priority: climax ? 72 : absorption ? 70 : confirmed ? 62 : 40, title, detail,
+        },
+      },
     });
   }
+  // 真实逐笔永远优先于 OHLC 近似；同源再按力度排序。
+  const ranked = flowMarks
+    .map(c => ({ ...c, rank: (c.item.source === 'real' ? 10 : 0) + c.score }))
+    .sort((a, b) => b.rank - a.rank);
+  const painted: typeof flowMarks = [];
+  for (const c of ranked) {
+    // 未收盘的预览永远画：那是"正在发生"的一根，不该被密度上限裁掉。
+    const preview = c.item.confirmed === false;
+    const keep = preview || (painted.length < 4 && !painted.some(p => Math.abs(p.idx - c.idx) < 6));
+    if (keep) painted.push(c);
+    c.item.paint = keep;
+  }
+  // 全部保留在 items（侧栏列表完整），只是没被选中的不画到画布。
+  items.push(...flowMarks.map(c => c.item));
 
   // First confirmed price retest. Re-evaluate at each then-known close; never
   // backdate a later hold to an earlier bar. Real flow is optional corroboration,
@@ -384,7 +502,8 @@ export function projectSignals(analysis: SignalAnalysis, preferences: SignalPref
   payload.decimals = decimalsFor(analysis.lastPrice);
   for (const item of visible) {
     const approximate = item.source === 'mixed' || item.source === 'approx';
-    if (item.event) payload.events.push({ ...item.event, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.event.text}` : '' });
+    // paint === false 的高频事件只进侧栏列表，不画到图上，避免标签糊成一片。
+    if (item.event && item.paint !== false) payload.events.push({ ...item.event, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.event.text}` : '' });
     if (item.levels && (item.type === 'keyLevels' || preferences.geometry)) payload.levels.push(...item.levels.map(l => ({ ...l, label: l.label && preferences.labels })));
     if (item.zone) payload.zones.push({ ...item.zone, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.zone.text}` : '' });
     if (item.path && preferences.geometry) payload.paths!.push({ id: `${item.id}:path`, ...item.path });

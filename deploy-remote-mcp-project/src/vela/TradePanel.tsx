@@ -3,6 +3,7 @@ import type { Vela } from '@luxalgo/vela';
 import { ChevronDown, Crosshair, Eye, EyeOff, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { runScan, liveFlowOf, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
 import { computeLevels } from '@/lib/engine';
+import { closedCandles } from '@/lib/candles';
 import { summarize, thresholdSweep } from '@/quant/stats';
 import { gradeMeta } from '@/quant/model';
 import { clampThreshold, getConfig, LIMITS, setConfig, subscribeConfig, type EngineConfig } from '@/quant/config';
@@ -86,7 +87,9 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
       return;
     }
     const t = window.setTimeout(() => {
-      const closed = candles.slice(0, -1);
+      // Do not assume the last provider item is always forming: use its
+      // timestamp, so a closed historical tail is not accidentally discarded.
+      const closed = closedCandles(candles, engineBar);
       // 传入实时盘口 / 大单方向：bookImbalance、tapeBias、thrustVolume 不再恒为 null
       const lf = liveFlowRef.current;
       const live = liveFlowOf(closed, lf.bookImb, lf.bigBias);

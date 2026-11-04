@@ -15,7 +15,12 @@ export interface FlowBar {
   buy: number;
   /** 主动卖出成交额（USDT） */
   sell: number;
-  /** 持仓量（USD 名义） */
+  /**
+   * 持仓量（合约张数）。判断是否有新仓进出场必须使用张数，
+   * 不能用随价格波动的 USD 名义值。
+   */
+  oiContracts?: number;
+  /** 旧快照/展示用的 USD 名义持仓；不能单独证明有新仓。 */
   oiUsd?: number;
   /** 来源：tape = 逐笔成交聚合；rubik = 官方统计 */
   src: 'tape' | 'rubik';
@@ -104,10 +109,14 @@ export function rubikBase(): string | null {
   if (typeof window === 'undefined') return REST;
   try {
     const v = localStorage.getItem('pulsedesk.okx-proxy');
-    return v && /^https?:\/\//.test(v) ? v.replace(/\/$/, '') : null;
+    if (v && /^https?:\/\//.test(v)) return v.replace(/\/$/, '');
   } catch {
-    return null;
+    /* storage unavailable */
   }
+  // Default: the app's own whitelisted proxy (src/app/api/okx/[...path]).
+  // Without it the browser only had ~8 bars of tape coverage, so historical
+  // heavy-selling/buying candles never showed real taker data.
+  return `${window.location.origin}/api/okx`;
 }
 
 async function okxGet(base: string, path: string, params: Record<string, string>, signal?: AbortSignal): Promise<unknown[]> {
@@ -116,6 +125,9 @@ async function okxGet(base: string, path: string, params: Record<string, string>
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url.toString(), { signal, cache: 'no-store' });
     if (res.status === 429) {
+      // An exhausted rate-limit retry is not an empty market response.  Throw
+      // so syncFlow does not mark a partial snapshot as complete.
+      if (attempt === 2) throw new Error('OKX rate limited (429)');
       await sleep(900 * (attempt + 1));
       continue;
     }
@@ -309,9 +321,13 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
       if (!Number.isFinite(ts)) continue;
       oldest = Math.min(oldest, ts);
       if (!(buy > 0 || sell > 0)) continue; // 保留边界之外返回全 0，视为缺失
+      // The newest row is the still-forming bar (partial totals). Leave it to
+      // the live tape; storing it as authoritative 'rubik' would block tape
+      // aggregation and freeze an incomplete delta.
+      if (ts + snap.barMs > Date.now()) continue;
       nonZero++;
       const prev = snap.bars.get(ts);
-      snap.bars.set(ts, { ts, buy, sell, oiUsd: prev?.oiUsd, src: 'rubik' });
+      snap.bars.set(ts, { ts, buy, sell, oiContracts: prev?.oiContracts, oiUsd: prev?.oiUsd, src: 'rubik' });
       snap.from = Math.min(snap.from, ts);
       snap.to = Math.max(snap.to, ts);
     }
@@ -329,12 +345,24 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
     let oldest = Infinity;
     for (const r of rows) {
       const ts = Number(r[0]);
+      // OKX returns [ts, oi(contracts), oiCcy, oiUsd].  Use the contract
+      // count for position-change evidence; oiUsd also moves with price.
+      const oiContracts = Number(r[1]);
       const oiUsd = Number(r[3]);
-      if (!Number.isFinite(ts) || !(oiUsd > 0)) continue;
+      if (!Number.isFinite(ts) || (!(oiContracts > 0) && !(oiUsd > 0))) continue;
       oldest = Math.min(oldest, ts);
       const prev = snap.bars.get(ts);
-      if (prev) prev.oiUsd = oiUsd;
-      else snap.bars.set(ts, { ts, buy: 0, sell: 0, oiUsd, src: 'rubik' });
+      if (prev) {
+        prev.oiContracts = oiContracts > 0 ? oiContracts : undefined;
+        prev.oiUsd = oiUsd > 0 ? oiUsd : undefined;
+      } else {
+        snap.bars.set(ts, {
+          ts, buy: 0, sell: 0,
+          oiContracts: oiContracts > 0 ? oiContracts : undefined,
+          oiUsd: oiUsd > 0 ? oiUsd : undefined,
+          src: 'rubik',
+        });
+      }
       snap.oiFrom = Math.min(snap.oiFrom, ts);
     }
     if (!Number.isFinite(oldest) || oldest <= Math.max(minTs, snap.from)) break;
@@ -360,8 +388,14 @@ export function syncFlow(
     const base = rubikBase();
     try {
       if (base) {
-        await syncRubik(snap, base, opts.minTs, opts.maxPages ?? 16, opts.oiPages ?? 12, opts.signal);
-        snap.complete = true;
+        // Official per-bar taker statistics. A failure here (rate limit, no
+        // proxy in a static/Vite build) must not block the live trade tape.
+        try {
+          await syncRubik(snap, base, opts.minTs, opts.maxPages ?? 16, opts.oiPages ?? 12, opts.signal);
+          snap.complete = true;
+        } catch (e) {
+          if (!opts.signal?.aborted) console.warn('[订单流] rubik 统计不可用，改用逐笔成交：', e);
+        }
       }
       if (opts.signal?.aborted) return snap;
       if (typeof window !== 'undefined') {

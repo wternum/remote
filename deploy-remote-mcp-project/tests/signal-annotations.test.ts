@@ -14,7 +14,10 @@ const inverted = analyzeSignals(bottom, ms, prefs, annotationFlow(bottom, 0.85),
 assert.ok(analysis.items.some(i => i.type === 'doubleTop'), 'double-top fixture must produce a confirmed price structure');
 assert.ok(inverted.items.some(i => i.type === 'doubleBottom'), 'mirrored fixture must produce a confirmed price structure');
 assert.ok(analysis.items.some(i => i.type === 'deltaImpulse' && i.source === 'real'));
-console.log('PASS price-only M/W detector and real taker imbalance annotations');
+const scenarioZone = analysis.items.find(i => i.type === 'keyLevelScenario');
+assert.ok(scenarioZone?.zone && scenarioZone.zone.lo < scenarioZone.zone.hi, 'recent M/W setup must project a visible key-level decision zone');
+assert.ok(scenarioZone.detail.length <= 3, 'scenario hover must stay concise');
+console.log('PASS price-only M/W detector, real taker imbalance and key-level decision zone');
 
 const projected = projectSignals(analysis, prefs);
 assert.ok(projected.payload.events.length > 0);

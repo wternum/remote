@@ -3,6 +3,8 @@ import { SYMBOLS } from '@/lib/types';
 import { runScan, SCAN_BARS, liveFlowOf, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
 import { FACTORS, MODEL } from '@/quant/model';
 import { getConfig } from '@/quant/config';
+import { closedCandles } from '@/lib/candles';
+import { getFlow, syncFlow, type FlowSnapshot } from '@/quant/flow';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,6 +46,12 @@ function wire(c: Candidate) {
     live: c.live,
     sym: c.sym,
     bar: c.bar,
+    // Small, useful provenance fields must survive the wire format; otherwise
+    // the API silently turns a real/taker candidate into an anonymous score.
+    trap: c.trap,
+    trapScore: c.trapScore,
+    flowSource: c.flowSource,
+    headline: c.headline,
     outcome: c.outcome,
     exits: c.exits,
   };
@@ -73,7 +81,10 @@ export async function GET(req: Request) {
   // 逐币种 / 逐周期拉取，避免触发 OKX 历史 K 线限频造成缺口
   for (const tf of timeframes) {
     for (const s of list) {
-      const { live, candles } = await getCandles(s, tf, SCAN_BARS(tf));
+      const { live, candles: rawCandles } = await getCandles(s, tf, SCAN_BARS(tf));
+      // getCandles also serves the chart and therefore includes OKX's forming
+      // candle.  The confirmation engine is strictly closed-bar only.
+      const candles = closedCandles(rawCandles, tf);
       allLive = allLive && live;
       bars += candles.length;
       if (candles.length) {
@@ -81,6 +92,9 @@ export async function GET(req: Request) {
         to = Math.max(to, candles[candles.length - 1].ts);
         lastTs = Math.max(lastTs, candles[candles.length - 1].ts);
       }
+      // Never carry the previous symbol/timeframe's book or volume ratio into
+      // a degraded/synthetic market.
+      flow = undefined;
       let bookImb: number | null = null;
       if (live) {
         try {
@@ -91,7 +105,29 @@ export async function GET(req: Request) {
         }
         flow = liveFlowOf(candles, bookImb, null);
       }
-      const scan = runScan(candles, tf, flow, s, plan);
+
+      // Node can use OKX rubik's official taker/OI history.  Bound the
+      // pagination so a panel request does not turn into an unbounded history
+      // download; uncovered older bars remain explicitly approximate.  In the
+      // browser, reuse the snapshot maintained by useFlow instead of starting
+      // a second tape/bootstrap loop.
+      let flowSnapshot: FlowSnapshot | null = null;
+      if (live && candles.length) {
+        if (typeof window === 'undefined') {
+          try {
+            flowSnapshot = await syncFlow(s, tf, {
+              minTs: candles[0]?.ts ?? 0,
+              maxPages: 4,
+              oiPages: 2,
+            });
+          } catch {
+            flowSnapshot = null;
+          }
+        } else {
+          flowSnapshot = getFlow(s, tf) ?? null;
+        }
+      }
+      const scan = runScan(candles, tf, flow, s, plan, flowSnapshot);
       confirmRows.push(...scan.confirm);
       touchRows.push(...scan.touch);
     }

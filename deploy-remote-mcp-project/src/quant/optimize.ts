@@ -32,6 +32,11 @@ export interface SegmentSlim {
 
 const tradable = (c: Candidate) => !!c.outcome?.filled && Number.isFinite(c.outcome.r);
 
+// In-sample labels must have exited before the out-of-sample window starts;
+// otherwise a position opened in-sample but closed later leaks future prices.
+const knownBefore = (c: Candidate, splitTs: number) =>
+  c.ts < splitTs && (c.outcome?.exitTs ?? c.ts) < splitTs;
+
 const applyPlan = (rows: Candidate[], plan: ExitPlan): Candidate[] =>
   rows.map(c => ({ ...c, outcome: c.exits?.[plan] ?? c.outcome }));
 
@@ -80,7 +85,7 @@ export function optimize(confirm: Candidate[], touch: Candidate[], oosFrac = 0.3
     if (pool.length < 20) continue;
     for (const plan of EXIT_PLANS) {
       const mapped = applyPlan(pool, plan.id).filter(tradable);
-      const isRows = mapped.filter(c => c.ts < splitTs);
+      const isRows = mapped.filter(c => knownBefore(c, splitTs));
       const oosRows = mapped.filter(c => c.ts >= splitTs);
       if (oosRows.length < 8) continue;
       for (const threshold of thresholds) {

@@ -33,6 +33,12 @@ const L = p.pivotLeft;
 const R = p.pivotRight;
 const MAX_TOL_ATR = 0.7;
 
+/** The same bounded ATR/price tolerance used by the price-only detector. */
+export function annotationTolerance(price: number, atr: number): number {
+  if (!(atr > 0) || !Number.isFinite(price)) return 0;
+  return Math.min(Math.max(p.tolAtr * atr, p.tolPct * Math.abs(price)), MAX_TOL_ATR * atr);
+}
+
 /**
  * A causal double test: the first pivot only exists after R *closed* right bars;
  * the second test needs enough neck-to-level height and a close back inside.
@@ -50,10 +56,7 @@ export function scanAnnotationPatterns(ctx: Ctx): AnnotationPattern[] {
       ? cs
       : cs.map(c => ({ ts: c.ts, o: -c.o, h: -c.l, l: -c.h, c: -c.c, v: c.v } satisfies Candle));
     const active: ActiveLevel[] = [];
-    const width = (price: number, a: number) => Math.min(
-      Math.max(p.tolAtr * a, p.tolPct * Math.abs(price)),
-      MAX_TOL_ATR * a,
-    );
+     const width = annotationTolerance;
 
     for (let i = 1; i < view.length; i++) {
       const c = view[i];

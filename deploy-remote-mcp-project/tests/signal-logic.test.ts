@@ -79,7 +79,7 @@ const keyOf = (analysis: ReturnType<typeof analyzeSignals> | ReturnType<typeof p
 const keyFull = keyOf(continuous);
 assert.ok(keyFull && keyFull.source === 'real', 'second test with real taker coverage gets a key-level flow marker');
 assert.ok(keyFull.title.includes('反转侧主动成交占优'), `fixture sell pressure should be reversal-aligned for a top: ${keyFull.title}`);
-assert.ok(keyFull.event?.text === 'Δ -70.0%', `event should expose the confirmation/test delta: ${keyFull.event?.text}`);
+assert.equal(keyFull.event?.text, '卖方占优', 'key-level label states the side in plain words, numbers live in the hover');
 assert.ok(keyFull.detail.some(line => line.includes('测试/确认K（同一根）') && line.includes('覆盖 100%')));
 assert.ok(keyFull.detail.some(line => line.includes('推进腿真实成交')), 'fully covered legs should be compared');
 assert.ok(keyFull.detail.some(line => line.includes('不是订单簿 OFI')));

@@ -22,6 +22,7 @@ import {
 import { buildContext, candidateFrom, type LiveFlow } from '@/quant/scan';
 import { FACTORS, gradeMeta } from '@/quant/model';
 import { getConfig, type EntryMode } from '@/quant/config';
+import { closedCandles } from '@/lib/candles';
 
 const maxHoldOf = (bar: string) => (bar === '15m' ? MAX_HOLD_15M : MAX_HOLD_5M);
 
@@ -76,7 +77,11 @@ export function simulate(
   opts: EngineBacktestOptions,
   p: DoubleParams = DEFAULT_PARAMS,
   confMin = CONF_MIN,
-): TradedSignal[] {
+ ): TradedSignal[] {
+  // The remote/browser backtest route can still pass OKX's forming candle.
+  // Normalize here as well as at the HTTP boundary so every caller shares the
+  // same closed-bar contract.
+  cs = closedCandles(cs, bar);
   const cfg = getConfig();
   const mode: EntryMode = opts.entryMode ?? cfg.entryMode;
   const baseThreshold = opts.threshold ?? cfg.threshold;

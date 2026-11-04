@@ -94,7 +94,11 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     lastFlowRequest = Date.now();
     // An aborted prior request may still be draining from the module's inflight cache.
     // On completion a new current-market tick retries if bootstrap was not completed.
-    void syncFlow(symbol, period, { minTs: 0, maxPages: 1, oiPages: 1, bootstrapBars: period === '5m' ? 8 : 4, bootstrapPages: 220, signal: controller.signal }).finally(() => {
+    // First sync backfills enough official per-bar taker data to cover the
+    // annotation lookback (100 bars/page); afterwards only the newest page.
+    const backfilled = !!getFlow(symbol, period)?.complete;
+    const pages = backfilled ? 1 : Math.min(14, Math.ceil(preferences.lookback / 100) + 1);
+    void syncFlow(symbol, period, { minTs: 0, maxPages: pages, oiPages: backfilled ? 1 : 2, bootstrapBars: period === '5m' ? 8 : 4, bootstrapPages: 220, signal: controller.signal }).finally(() => {
       if (!alive || controller.signal.aborted || epoch !== flowEpoch) return;
       flowBusy = false;
       needsScan = true;

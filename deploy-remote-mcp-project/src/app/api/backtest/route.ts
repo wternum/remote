@@ -5,6 +5,7 @@ import { getCandles } from "@/server/okx";
 import { simulate, summarize, MAX_HOLD_5M, MAX_HOLD_15M } from "@/lib/engine";
 import { SYMBOLS, type BacktestResult, type TradedSignal } from "@/lib/types";
 import { clampThreshold, configFromCookie } from "@/quant/config";
+import { closedCandles } from "@/lib/candles";
 
 export const dynamic = "force-dynamic";
 
@@ -81,7 +82,13 @@ export async function GET(req: Request) {
 
   // 逐个币种拉取，避免触发 OKX 历史 K 线限频导致数据缺口
   const loaded: Awaited<ReturnType<typeof getCandles>>[] = [];
-  for (const s of symbols) loaded.push(await getCandles(s, bar, btBars(bar), fresh));
+  for (const s of symbols) {
+    const loadedOne = await getCandles(s, bar, btBars(bar), fresh);
+    // Keep chart/forming-candle data out of the closed-bar simulation and its
+    // metadata (bars/from/to), so the response describes the same sample that
+    // was actually traded.
+    loaded.push({ ...loadedOne, candles: closedCandles(loadedOne.candles, bar) });
+  }
   const recs: TradedSignal[] = [];
   let from = Infinity;
   let to = 0;

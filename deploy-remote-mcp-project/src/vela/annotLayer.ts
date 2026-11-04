@@ -208,7 +208,7 @@ function textW(ctx: Ctx2D, s: string, font = FONT) {
 function pill(ctx: Ctx2D, r: Rect, text: string, tone: AnnTone, solid: boolean) {
   const c = TONE_COLOR[tone];
   ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, r.h, 3);
+  ctx.roundRect(r.x, r.y, r.w, r.h, 6);
   ctx.fillStyle = solid ? c : BG;
   ctx.fill();
   if (!solid) {
@@ -447,7 +447,7 @@ function renderCard(f: Frame, hit: Hit, cursor: { x: number; y: number }) {
   const h = 8 + titleLines.length * 15 + (lines.length ? 4 + lines.length * 14 : 0) + 6;
   const r = placeCard(cursor, w, h, plot);
   ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, r.h, 4);
+  ctx.roundRect(r.x, r.y, r.w, r.h, 8);
   ctx.fillStyle = 'rgba(13,17,25,0.96)';
   ctx.fill();
   ctx.strokeStyle = rgba(TONE_COLOR[hit.tone], 0.6);

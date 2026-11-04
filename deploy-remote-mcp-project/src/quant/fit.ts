@@ -162,6 +162,14 @@ export interface SegmentStat {
 
 const tradable = (c: Candidate) => !!c.outcome?.filled && Number.isFinite(c.outcome.r);
 
+/**
+ * A training label is available only after the trade has exited.  Signal-time
+ * slicing alone lets a trade that exits inside the test window leak its future
+ * outcome into fitting, so purge those overlapping training samples.
+ */
+const knownBefore = (c: Candidate, splitTs: number) =>
+  c.ts < splitTs && (c.outcome?.exitTs ?? c.ts) < splitTs;
+
 function evaluate(rows: Candidate[], scores: number[], threshold: number): SegmentStat {
   const idx = rows.map((_, i) => i).filter(i => scores[i] >= threshold);
   const n = idx.length;
@@ -191,7 +199,13 @@ function evaluateTop(rows: Candidate[], scores: number[], take: number): Segment
   const order = scores.map((s, i) => ({ s, i })).sort((a, b) => b.s - a.s);
   const chosen = new Set(order.slice(0, Math.max(0, take)).map(o => o.i));
   const picked = rows.map((_, i) => (chosen.has(i) ? 1 : 0));
-  return evaluate(rows, picked, 0.5);
+  const selected = evaluate(rows, picked, 0.5);
+  // `picked` is only a selection mask for the top-N experiment.  Using it as
+  // the model score made AUC/Brier describe a binary 0/1 vector instead of the
+  // fitted model.  Keep top-N trading stats, but evaluate discrimination and
+  // calibration with the actual continuous scores over the full test set.
+  const y = rows.map(c => (c.outcome!.r > 0 ? 1 : 0));
+  return { ...selected, auc: auc(scores, y), brier: brier(scores, y) };
 }
 
 export interface FactorDiagnostic {
@@ -271,7 +285,8 @@ export function walkForward(cands: Candidate[], threshold: number, trainFrac = 0
   const pool = cands.filter(tradable).sort((a, b) => a.ts - b.ts);
   if (pool.length < 40) return null;
   const cut = Math.floor(pool.length * trainFrac);
-  const train = pool.slice(0, cut);
+  const splitTs = pool[cut]?.ts ?? 0;
+  const train = pool.slice(0, cut).filter(c => knownBefore(c, splitTs));
   const test = pool.slice(cut);
   if (train.length < 20 || test.length < 10) return null;
 
@@ -291,8 +306,9 @@ export function walkForward(cands: Candidate[], threshold: number, trainFrac = 0
   const foldSize = Math.floor(pool.length / (foldCount + 1));
   for (let k = 1; k <= foldCount; k++) {
     const end = foldSize * k;
-    const tr = pool.slice(0, end);
     const te = pool.slice(end, end + foldSize);
+    const foldSplitTs = te[0]?.ts ?? 0;
+    const tr = pool.slice(0, end).filter(c => knownBefore(c, foldSplitTs));
     if (tr.length < 20 || te.length < 8) continue;
     const f = fitLogistic(
       tr.map(c => c.evidence),
@@ -317,7 +333,7 @@ export function walkForward(cands: Candidate[], threshold: number, trainFrac = 0
     stableCount: diagnostics.filter(d => d.stable).length,
     trainN: train.length,
     testN: test.length,
-    splitTs: test[0].ts,
+    splitTs,
     fit,
     prior: priorStat,
     fitted: evaluateTop(test, fittedScores, take),
