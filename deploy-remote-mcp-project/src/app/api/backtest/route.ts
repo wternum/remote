@@ -1,9 +1,10 @@
-import { db } from "@/db";
+import { db, initializeDatabase } from "@/db";
 import { sql } from "drizzle-orm";
 import { backtestRuns } from "@/db/schema";
 import { getCandles } from "@/server/okx";
 import { simulate, summarize, MAX_HOLD_5M, MAX_HOLD_15M } from "@/lib/engine";
 import { SYMBOLS, type BacktestResult, type TradedSignal } from "@/lib/types";
+import { clampThreshold, configFromCookie } from "@/quant/config";
 
 export const dynamic = "force-dynamic";
 
@@ -49,13 +50,33 @@ export async function GET(req: Request) {
   const flow = url.searchParams.get("flow") === "on";
   const fresh = url.searchParams.get("fresh") === "1";
 
-  const key = `${symbol}|${bar}|${flow}`;
+  // UI 的概率门槛 / 入场方式 / 是否替换结构过滤：query 优先，其次 cookie（由 setConfig 写入）。
+  // 此前服务端只能拿到 DEFAULT_CONFIG，导致用户调参对回测完全无效。
+  const fromCookie = configFromCookie(req.headers.get("cookie"));
+  const qThreshold = url.searchParams.get("threshold");
+  const qMode = url.searchParams.get("mode");
+  const qReplace = url.searchParams.get("replaceConf");
+  const engine = {
+    threshold:
+      qThreshold != null && qThreshold !== "" && Number.isFinite(Number(qThreshold))
+        ? clampThreshold(Number(qThreshold))
+        : fromCookie.threshold,
+    entryMode: qMode === "touch" || qMode === "confirm" ? qMode : fromCookie.entryMode,
+    replaceConfFilter: qReplace != null ? qReplace !== "0" : fromCookie.replaceConfFilter,
+  };
+
+  // 配置必须进入缓存键，否则不同门槛会共用同一份回测结果
+  const key = `${symbol}|${bar}|${flow}|${engine.threshold ?? "def"}|${engine.entryMode ?? "def"}|${String(engine.replaceConfFilter)}`;
   if (!fresh) {
     const hit = BT_CACHE.get(key);
     if (hit && Date.now() - hit.at < 180_000) return Response.json(hit.res);
   }
 
-  const opts = { flowFilter: flow, maxHold: bar === "15m" ? MAX_HOLD_15M : MAX_HOLD_5M };
+  const opts = {
+    flowFilter: flow,
+    maxHold: bar === "15m" ? MAX_HOLD_15M : MAX_HOLD_5M,
+    ...engine,
+  };
   const symbols = symbol === "ALL" ? SYMBOLS.map((s) => s.id as string) : [symbol];
 
   // 逐个币种拉取，避免触发 OKX 历史 K 线限频导致数据缺口
@@ -87,9 +108,16 @@ export async function GET(req: Request) {
     symbols,
   });
   res.live = live;
+  // 回显本次实际生效的引擎配置，便于核对 UI 与回测是否同口径
+  (res as BacktestResult & { engine?: unknown }).engine = {
+    threshold: engine.threshold ?? null,
+    entryMode: engine.entryMode ?? null,
+    replaceConfFilter: engine.replaceConfFilter ?? null,
+  };
 
   // 持久化（容错：DB 不可用不影响返回）
   try {
+    await initializeDatabase();
     await persist(recs, bar);
     await db
       .insert(backtestRuns)

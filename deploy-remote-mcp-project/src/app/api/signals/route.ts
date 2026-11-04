@@ -1,4 +1,4 @@
-import { db } from "@/db";
+import { db, initializeDatabase } from "@/db";
 import { sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +27,7 @@ interface LiveSignalBody {
 
 export async function POST(req: Request) {
   try {
+    await initializeDatabase();
     const body = (await req.json()) as LiveSignalBody;
     if (!body?.id || !body?.symbol) {
       return Response.json({ error: "missing fields" }, { status: 400 });

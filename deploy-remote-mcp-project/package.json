@@ -2,11 +2,16 @@
   "name": "nextjs-postgresql-template",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "vite",
+    "build": "node scripts/prepare-runtime.mjs && vite build && next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:next": "next dev",
+    "build:spa": "node scripts/prepare-runtime.mjs && vite build",
+    "build:next": "next build",
+    "preview": "vite preview",
+    "test:quant": "node scripts/run-ts-test.mjs tests/orderflow.test.ts && node scripts/run-ts-test.mjs tests/annot-layout.test.ts && node scripts/run-ts-test.mjs tests/audit-fixes.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.14",

@@ -1,6 +1,6 @@
 # PULSEDESK Local Workspace
 
-The existing Chinese-language Vela/OKX trading workspace has been imported from the user-provided MCP endpoint. The original interface, indicator library, drawing tools, trading sidebar, and legacy page are preserved.
+The Chinese-language Vela/OKX workspace preserves its original chart, indicator library, drawing tools and `#legacy` page. The old trading sidebar has been removed; the current sidebar is **信号标注**, which displays price-structure annotations and evidence-qualified OKX taker-trade observations. See [`src/vela/signals/README.md`](src/vela/signals/README.md) for the exact rules, provenance, limitations and primary research references. Visual annotations are not trade recommendations or calibrated win probabilities.
 
 ## Run Locally
 
@@ -46,12 +46,8 @@ All 230 original source/reference/test files (8,124,819 bytes) match the remote 
 The original 34 browser regression checks pass. Additional desktop/mobile/database checks pass against both the development server and production preview. The local browser runtime and a deferred nested-root cleanup are the only compatibility adjustments beyond dependency security patches; see `TASKS.md`.
 
 MCP connection helpers in `scripts/` read `MCP_URL_BASE64` from the environment or the ignored local connection file. The endpoint is not embedded in the web application.
-## Order Flow Read (5m double top / bottom)
+## Current signal annotations
 
-The trade sidebar now contains an **订单流判读** card driven by real OKX taker flow (recent trades bootstrap + live `trades` WebSocket, aggregated per bar and validated against candle quote volume):
+The sidebar has eight selectable types: double top/bottom, support/resistance, price-breakout retest, tentative high/low sweeps, **real** taker CVD divergence, and real taker buy/sell imbalance. Its master switch and per-type switches control only annotations; no orders are placed. Without continuous actual trades, it does not invent CVD. Optional OHLC-derived observations are displayed as `≈` price proxies and must not be mistaken for actual order flow. The chart's original trade/backtest engine is separate from the annotation detector.
 
-- Double top → probability of decline; double bottom → probability of rise (evidence model with real delta, CVD extreme divergence, sweep-trap, confirm-bar delta, open-interest factors).
-- 诱多 / 诱空 detection: sweep beyond the prior high/low that closes back inside while aggressive flow sits on the reversal side (or chasing volume is absorbed).
-- Breakout → pullback follow-through: breakout bar volume/delta/extension, pullback volume and delta, retest hold/fail, chart-history rates for "chase the break" vs "wait for the retest", with a retest zone painted on the chart.
-
-Tests: `node scripts/run-ts-test.mjs tests/orderflow.test.ts` and `node tests/flowread.browser.mjs`. See `TASKS.md` (任务卡 2) for rules, data sources, and limits.
+Verification: `node scripts/run-ts-test.mjs tests/signal-logic.test.ts`, `node scripts/run-ts-test.mjs tests/signal-annotations.test.ts` and `TEST_URL=http://127.0.0.1:3000/ node tests/signal-annotations.browser.mjs` after starting the production preview. Read `src/vela/signals/README.md` for the decision rules and referenced papers. `TASKS.md` preserves the **historical** trading-sidebar task record; it does not describe current sidebar behavior.

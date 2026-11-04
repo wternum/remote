@@ -61,6 +61,20 @@ function symbolBreakdown(rows: Row[], threshold: number) {
 /** 与页面顶栏的实时选择保持同步（只读 DOM，不改远程组件） */
 export function readActiveMarket(): { symbol: string; bar: string } {
   const out = { symbol: 'BTC-USDT-SWAP', bar: '5m' };
+  // Vela 工作区：直接读图表当前市场（旧版 header 的 DOM 在主界面不存在，此前永远返回默认值）
+  try {
+    const ws = (window as unknown as { __velaWs?: { chart?: { market?: { symbol?: string; timeframe?: string } } } })
+      .__velaWs;
+    const market = ws?.chart?.market;
+    const ticker = (market?.symbol ?? '').replace(/^okx:/i, '');
+    if (/^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker)) {
+      out.symbol = ticker;
+      out.bar = Number(market?.timeframe) >= 15 ? '15m' : '5m';
+      return out;
+    }
+  } catch {
+    /* 工作区未就绪则继续尝试旧版 DOM */
+  }
   try {
     const header = document.querySelector('header');
     if (!header) return out;
@@ -163,6 +177,13 @@ export function useEngine(open: boolean) {
 
   const baseline = useMemo(() => touchPoolAll.filter(tradable), [touchPoolAll]);
 
+  // 当前入场模式对应的样本池：所有诊断统计都必须跟随它，
+  // 此前校准/归因/walk-forward 等写死 confirmPool，切到触价模式后口径不一致。
+  const activePool = useMemo(
+    () => (cfg.entryMode === 'touch' ? touchPoolAll : confirmPool),
+    [cfg.entryMode, touchPoolAll, confirmPool],
+  );
+
   const stats = useMemo(() => {
     if (!payload) return null;
     const gatedPool = cfg.entryMode === 'touch' ? touchPoolAll : confirmPool;
@@ -173,9 +194,9 @@ export function useEngine(open: boolean) {
     // 五种出场方案在同一门槛下横向对比
     const exitCompare = EXIT_PLANS.map(p => ({
       ...p,
-      stat: summarize(withPlan(confirmPool, p.id), cfg.threshold),
+      stat: summarize(withPlan(activePool, p.id), cfg.threshold),
     }));
-    const wf: WalkForward | null = walkForward(confirmPool, cfg.threshold);
+    const wf: WalkForward | null = walkForward(activePool, cfg.threshold);
     const opt = optimize(confirmPool, touchPoolAll);
     // 严格可比的基线：同一批确认形态、同一出场方案，只是不设概率门槛
     const edge = edgeOverBaseline(now, structureOnly);
@@ -191,16 +212,16 @@ export function useEngine(open: boolean) {
       structureOnly,
       exitCompare,
       walkForward: wf,
-      calib: calibration(confirmPool, 8),
-      sweep: thresholdSweep(confirmPool, 0.42, 0.82, 21),
-      attribution: attribution(confirmPool, cfg.threshold),
-      killers: topKillers(confirmPool, cfg.threshold),
-      grades: gradeDistribution(confirmPool),
-      bySymbol: symbolBreakdown(confirmPool, cfg.threshold),
-      equityGated: equitySeries(confirmPool, cfg.threshold),
+      calib: calibration(activePool, 8),
+      sweep: thresholdSweep(activePool, 0.42, 0.82, 21),
+      attribution: attribution(activePool, cfg.threshold),
+      killers: topKillers(activePool, cfg.threshold),
+      grades: gradeDistribution(activePool),
+      bySymbol: symbolBreakdown(activePool, cfg.threshold),
+      equityGated: equitySeries(activePool, cfg.threshold),
       equityRaw: equitySeries(touchPool.length >= 15 ? touchPool : confirmPool, 0),
     };
-  }, [payload, cfg.threshold, cfg.entryMode, confirmPool, touchPoolAll, withPlan]);
+  }, [payload, cfg.threshold, cfg.entryMode, confirmPool, touchPoolAll, activePool, withPlan]);
 
   /** 最近一个二次测试形态（含距今多少根），用于「当下该不该进场」判断 */
   const current = useMemo(() => {

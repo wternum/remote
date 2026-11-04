@@ -1,8 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { startRuntime } from './runtime/bootstrap';
-import { bindEngineOpener } from './vela/registerTradePanel';
 
-// 新外壳：Vela 工作区（vela.luxalgo.com 同款 UI）+ OKX 数据 + 右侧「交易」侧栏
+// 新外壳：Vela 工作区（vela.luxalgo.com 同款 UI）+ OKX 数据
 const VelaTerminal = lazy(() => import('./vela/VelaTerminal'));
 const IndicatorPickerHost = lazy(() => import('./vela/IndicatorPickerDialog'));
 const MarketControlsHost = lazy(() => import('./vela/marketControls'));
@@ -10,6 +9,8 @@ const MarketControlsHost = lazy(() => import('./vela/marketControls'));
 const ConfirmEnginePanel = lazy(() => import('./components/confirm/ConfirmEnginePanel'));
 // 原 PULSEDESK 页面（远程项目原样），可通过 #legacy 访问
 const LegacyPage = lazy(() => import('../remote/setup-mcp-project-locally/src/app/page'));
+// 缺陷修复任务卡（构造 / 策略 / 订单流审计），可通过 #audit 访问
+const AuditBoard = lazy(() => import('./audit/AuditBoard'));
 
 // 运行时（本地持久化 + /api 路由）在后台初始化；不再阻塞首屏，也没有启动动画
 void startRuntime().catch(reason => {
@@ -49,10 +50,6 @@ export default function App() {
   const [engine, setEngine] = useState(false);
   const hash = useHash();
 
-  useEffect(() => {
-    bindEngineOpener(() => setEngine(true));
-  }, []);
-
   // 快捷键 C：开合确认引擎（输入框内不拦截；Vela 自己的快捷键不受影响）
   const onKey = useCallback((e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
@@ -70,6 +67,14 @@ export default function App() {
     return (
       <Suspense fallback={<Fallback text="正在加载原始 PULSEDESK 页面…" />}>
         <LegacyPage />
+      </Suspense>
+    );
+  }
+
+  if (hash === '#audit') {
+    return (
+      <Suspense fallback={<Fallback text="正在加载缺陷修复任务卡…" />}>
+        <AuditBoard />
       </Suspense>
     );
   }

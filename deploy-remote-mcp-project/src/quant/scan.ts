@@ -122,6 +122,9 @@ export function collectEvidence(ctx: Ctx, sig: ScanSignal, live?: LiveFlow): (nu
   const pv = pivotOf(ctx, sig);
   const dir = sig.side === 'long' ? 1 : -1;
   const out: (number | null)[] = new Array(FACTORS.length).fill(null);
+  // 触价挂单在触及关键位当根成交，并不存在随后的拒绝/确认K：
+  // 相关“确认K”证据必须记为缺失，而不是拿信号K本身充当确认K（会系统性压低 touch 概率）。
+  const isTouch = sig.fill === 'limit';
   const { l1a, l1b, l2a, l2b } = legsOf(pv);
   const read = readSecondTest(ctx, sig);
 
@@ -147,11 +150,14 @@ export function collectEvidence(ctx: Ctx, sig: ScanSignal, live?: LiveFlow): (nu
   const cb = cs[i];
   const cRange = Math.max(1e-9, cb.h - cb.l);
   const closePos = (cb.c - cb.l) / cRange;
-  set('wickReject', (tail - 0.3) * 1.8 + (dir > 0 ? closePos - 0.5 : 0.5 - closePos) * 1.6);
+  set(
+    'wickReject',
+    (tail - 0.3) * 1.8 + (isTouch ? 0 : (dir > 0 ? closePos - 0.5 : 0.5 - closePos) * 1.6),
+  );
 
   // 5-7) 仅实时可得的盘口 / 成交带因子
   if (live) {
-    set('thrustVolume', live.volRatio == null ? null : ((live.volRatio || 0) - 1) / 1.0);
+    set('thrustVolume', isTouch || live.volRatio == null ? null : ((live.volRatio || 0) - 1) / 1.0);
     set('bookImbalance', live.bookImb == null ? null : (live.bookImb || 0) * 2 * dir);
     set('tapeBias', live.bigBias == null ? null : (live.bigBias || 0) * 1.5 * dir);
   }
@@ -217,7 +223,7 @@ export function collectEvidence(ctx: Ctx, sig: ScanSignal, live?: LiveFlow): (nu
   set('touchFlow', read.touch.evidence);
 
   // 17) 确认K真实主动方向（仅真实数据）
-  set('testDelta', read.confirm.known ? read.confirm.deltaRatio * dir * 3 : null);
+  set('testDelta', !isTouch && read.confirm.known ? read.confirm.deltaRatio * dir * 3 : null);
 
   // 18) 持仓被套（仅有持仓量数据）
   set('oiTrap', read.oi.pct == null ? null : (read.oi.pct / 0.006) * 1);
@@ -383,7 +389,13 @@ export function runScan(
   const ctx = buildContext(cs, flow);
   const maxHold = bar === '15m' ? MAX_HOLD_15M : MAX_HOLD_5M;
   const pick = (mode: EntryMode) => {
-    const p = { ...DEFAULT_PARAMS, entryMode: mode === 'touch' ? ('limit' as const) : ('confirm' as const) };
+    // 与 src/lib/engine.ts 的 paramsFor 保持同一口径：关闭原引擎的一刀切趋势屏蔽，
+    // 否则回测（simulate）与侧栏 / 引擎面板（runScan）会在同一形态上给出不同信号集合。
+    const p = {
+      ...DEFAULT_PARAMS,
+      entryMode: mode === 'touch' ? ('limit' as const) : ('confirm' as const),
+      trendBlock: 50,
+    };
     return scanDoubles(cs, p).signals
       .map(s => candidateFrom(ctx, s, mode, maxHold, live, sym, bar, plan))
       .filter((c): c is Candidate => !!c);

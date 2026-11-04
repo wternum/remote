@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vela } from '@luxalgo/vela';
 import { ChevronDown, Crosshair, Eye, EyeOff, ShieldCheck, SlidersHorizontal } from 'lucide-react';
-import { runScan, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
+import { runScan, liveFlowOf, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
 import { computeLevels } from '@/lib/engine';
 import { summarize, thresholdSweep } from '@/quant/stats';
 import { gradeMeta } from '@/quant/model';
 import { clampThreshold, getConfig, LIMITS, setConfig, subscribeConfig, type EngineConfig } from '@/quant/config';
 import { useChartBars, useLastPrice } from './useChartBars';
 import { useFlow } from './useFlow';
+import { useLiveFlow } from './useLiveFlow';
 import FlowRead from './FlowRead';
 import { annotateCandidate, clearAnnotations, clearLevels, clearRead, hoverSignal, paintLevels, paintRead, type ReadAnnotation } from './annotate';
 import { tfMs } from './okxProvider';
@@ -63,6 +64,11 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
   const engineBar = Number(bars.timeframe) >= 15 ? '15m' : '5m';
   const flow = useFlow(bars.symbol, bars.timeframe, bars.closedTs, bars.candles[0]?.ts ?? 0);
 
+  // 实时订单流因子（盘口失衡 / 大单主动方向）：通过 ref 参与下一次重算，避免每 5s 全量重扫
+  const liveFlow = useLiveFlow(bars.symbol, bars.timeframe);
+  const liveFlowRef = useRef(liveFlow);
+  liveFlowRef.current = liveFlow;
+
   const scanKey = `${bars.symbol}|${bars.timeframe}|${bars.closedTs}|${exitPlan}|${cfg.entryMode}|flow${flow.version}`;
   const scanKeyRef = useRef('');
   const candlesRef = useRef(bars.candles);
@@ -81,7 +87,10 @@ export default function TradePanel({ getChart, onOpenEngine }: { getChart: () =>
     }
     const t = window.setTimeout(() => {
       const closed = candles.slice(0, -1);
-      const r = runScan(closed, engineBar, undefined, bars.symbol, exitPlan, flowRef.current);
+      // 传入实时盘口 / 大单方向：bookImbalance、tapeBias、thrustVolume 不再恒为 null
+      const lf = liveFlowRef.current;
+      const live = liveFlowOf(closed, lf.bookImb, lf.bigBias);
+      const r = runScan(closed, engineBar, live, bars.symbol, exitPlan, flowRef.current);
       const pool = (cfg.entryMode === 'touch' ? r.touch : r.confirm).sort((a, b) => b.ts - a.ts);
       setScan({ rows: pool, levels: computeLevels(closed), n: closed.length, ctx: r.ctx, coverage: r.ctx.flowCoverage });
     }, 60);

@@ -22,10 +22,15 @@ export async function GET() {
     }
   }
 
-  return new Response('PULSEDESK is initializing...', {
-    status: 503,
-    headers: {
-      'content-type': 'text/plain; charset=utf-8',
+  // dist/index.html 由 vite build 生成（npm run build 已串起 prepare-runtime + vite build + next build）。
+  // 两者都缺失说明 SPA 从未构建过，必须明确报错，而不是让前端一直等待“初始化”。
+  return new Response(
+    'PULSEDESK SPA bundle is missing. Run `npm run build` (prepare-runtime + vite build + next build), or `npm run build:spa` for the frontend only.',
+    {
+      status: 503,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+      },
     },
-  });
+  );
 }

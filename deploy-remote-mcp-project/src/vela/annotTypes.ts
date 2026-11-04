@@ -74,10 +74,18 @@ export interface AnnObstacle {
   points: { time: number; price: number }[];
 }
 
+export interface AnnPath {
+  id: string;
+  points: { ts: number; price: number }[];
+  tone: AnnTone;
+}
+
 export interface AnnPayload {
   levels: AnnLevel[];
   events: AnnEvent[];
   zones: AnnZone[];
+  /** Optional shape geometry; original annotation producers remain compatible. */
+  paths?: AnnPath[];
   position: AnnPosition | null;
   obstacles: AnnObstacle[];
   decimals: number;

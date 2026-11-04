@@ -30,6 +30,24 @@ const loadWasm = (name: string) => fetchBinary(name, isWasm).then(bytes => WebAs
 let database: any;
 let client: PGlite | undefined;
 let initialization: Promise<void> | undefined;
+// 服务端 pg 连接与建表状态：此前服务端从不执行 migrations，导致 signals/backtest_runs 不存在
+let serverPool: { query: (text: string) => Promise<unknown> } | undefined;
+let serverSchema: Promise<void> | undefined;
+
+/** 服务端幂等建表（与浏览器 PGlite 使用同一份 migrations SQL） */
+function ensureServerSchema(): Promise<void> {
+  if (!serverSchema) {
+    serverSchema = (async () => {
+      if (!serverPool) return;
+      await serverPool.query(migrations);
+    })().catch(error => {
+      // 失败后允许下一次请求重试，而不是把 rejected Promise 永久缓存
+      serverSchema = undefined;
+      throw error;
+    });
+  }
+  return serverSchema;
+}
 
 function getDatabase() {
   if (!database && !isBrowser) {
@@ -41,7 +59,10 @@ function getDatabase() {
       const databaseUrl = process.env.DATABASE_URL;
       if (databaseUrl) {
         const p = new Pool({ connectionString: databaseUrl });
+        serverPool = p;
         database = drizzle(p, { schema });
+        // 首次访问即开始建表；health/backtest/signals 会 await initializeDatabase() 等待就绪
+        void ensureServerSchema().catch(error => console.warn('Server schema init failed:', error));
       }
     } catch {
       // ignore
@@ -113,7 +134,11 @@ const migrations = `
 
 export function initializeDatabase(): Promise<void> {
   if (typeof window === 'undefined') {
-    return Promise.resolve();
+    // 服务端：确保 pg 连接已建立且表已创建（无 DATABASE_URL 时按原逻辑静默降级）
+    getDatabase();
+    return ensureServerSchema().catch(error => {
+      console.warn('Server database unavailable:', error);
+    });
   }
   if (!initialization) {
     initialization = (async () => {

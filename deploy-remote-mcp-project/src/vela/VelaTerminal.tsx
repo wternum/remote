@@ -3,7 +3,6 @@ import { VelaWorkspace } from '@luxalgo/vela/workspace';
 import { registerLocale } from '@luxalgo/vela';
 import zhHans from '@luxalgo/vela/locales/zh-Hans';
 import { OKXProvider, OKX_TIMEFRAMES } from './okxProvider';
-import { registerTradePanel } from './registerTradePanel';
 import { registerIndicatorPicker } from './registerIndicatorPicker';
 import { registerMarketControls } from './marketControls';
 import { installVelaHitFix } from './hitFix';
@@ -13,12 +12,13 @@ import { enhanceDrawingMenus } from '../lib/drawing-menu';
 import { installQuantHover } from './toolbarSlide';
 import { installToolbarHover } from './toolbarHover';
 import { registerAnnotLayers } from './annotLayer';
+import { registerSignalPanel } from './registerSignalPanel';
 
-// 一次性注册：语言包 + 侧栏 + 指标多选（模块级，Vela 要求在构造前完成）
+// 一次性注册：语言包、指标、标注侧栏及其独立运行器（构造前完成）
 registerLocale(zhHans);
-registerTradePanel();
 registerIndicatorPicker();
 registerMarketControls();
+registerSignalPanel();
 // 系统标注图层：渲染器在构造时按注册表实例化图层，必须先于 new VelaWorkspace
 registerAnnotLayers();
 
@@ -30,7 +30,7 @@ export interface VelaTerminalProps {
 
 /**
  * vela.luxalgo.com 同款外壳：顶栏（搜索/周期/样式/指标/撤销）· 左侧绘图栏 ·
- * 状态行 · 符号水印 · 底部区间栏 · 右侧「交易」侧栏 —— 数据源换成 OKX 永续。
+ * 状态行 · 符号水印 · 底部区间栏 —— 数据源换成 OKX 永续。
  */
 // 默认 5m：双顶/双底 + 订单流判读聚焦的短线周期（已保存的工作区状态优先）
 export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe = '5', onReady }: VelaTerminalProps) {

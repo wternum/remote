@@ -1,0 +1,52 @@
+# 信号标注侧栏：判定口径
+
+右上角「信号标注」打开 Vela 原生侧栏；收起侧栏不停止工作区运行器。九类：双顶、双底、支撑/阻力、突破回踩、关键位成交反应、诱多候选、诱空候选、CVD 背离、主动成交异动。
+
+本模块**不提供交易执行、下单、校准概率或盈利保证**；仅对当时已有数据做观察性标注。交易回测和模型仍走原来的 `src/lib/engine.ts` / `src/quant/`，不会被视觉标注器替代。
+
+## 数据与来源
+
+- 价格来自图表 OKXProvider 的同源镜像。只用已收盘 K 线；可选未收盘 Δ 预览会写明「预览」，条件消失即撤销。遇到历史 K 线断档，只分析最新连续段，不跨缺口连接二次测试。
+- `flow.ts` 将 OKX 的 `trades` / `history-trades.side`（**吃单方** buy / sell）按合约面值 × 成交价换算为 USDT 名义额，逐笔去重并按周期汇总。逐笔聚合总额至少达到对应 K 线报价币成交额的 85% 才记「真实逐笔」；缺失数据为缺失，不代表买卖平衡。
+- `buy − sell` 是 **taker 主动成交差**，不是订单簿 order-flow imbalance（OFI：包括挂单新增/撤单/市价单），也不能证明某人的止损订单真的被触发。
+- 默认订单流类只展示真正具备本类所需真实数据的结果。手动开启「允许 K 线近似」后，允许观察 ≈ 扫高/扫低收回（仅价格）及 ≈ K 线量价强弱（OHLC 收盘位置代理）；**不**用近似值造 CVD 背离或把近似量价写成真实主动成交。
+
+## 识别规则（阈值均为未校准的工程参数）
+
+| 类别 | 何时画标记 | 数据要求 |
+| --- | --- | --- |
+| 双顶 / 双底 | 左 8 / 右 5 根收盘确认第一次摆动点；间隔 ≥8 根，颈线距离 ≥2 ATR；第二次测试处于 ATR 容差内、不能深刺破，收盘拒绝确认（或下一根确认） | 仅价格/ATR；**不使用交易成本、止损空间、盈亏比**筛掉视觉形态；首次摆动须在右侧 5 根收盘后才能知晓 |
+| 支撑 / 阻力 | 已确认摆动位，最近 288 根内仍未收盘突破；离现价最近的 8 条 | 仅价格 |
+| 诱多 / 诱空候选 | 形态第二次测试刺过第一极值 ≥0.05 ATR、收盘收回；测试与确认 K 都有真实 taker 成交；反转侧净主动额占优，或突破侧主动成交放量但价格无法守在位外 | 局部真实逐笔覆盖；无数据时可选 ≈「扫高/扫低收回（仅价格）」，不声称具体止损成交 |
+| 关键位成交反应 | 附属于已确认 M/W 第二次测试；测试 K 或确认 K 至少一根有完整真实 taker 覆盖时显示 B/S 名义额、`(B−S)/(B+S)`、覆盖率、量比、扫位深度与确认收盘位置；两条价格推进腿每根连续真实覆盖时才比较推进侧占比 | 真实逐笔；无覆盖不生成真实标记。它是关键位成交观察，不是订单簿 OFI，也不证明止损、仓位或被动挂单 |
+| CVD 背离 | 价格回到前高/前低，但从第一极值到第二次测试之间的**每根**连续 K 线均有真实 taker 成交，累计净主动成交变化未确认第二次极值 | 整段连续真实逐笔覆盖；历史回补有限，常常没有足够证据，此时不画标记 |
+| 主动成交异动 | K 线量比 ≥1.5（对过去 20 根），`|buy−sell| / (buy+sell) ≥ 0.25`；同方向连续异动隔 3 根去重。可选形成中预览 | 单根真实逐笔覆盖；可选的 ≈ 量价代理单独命名、与真实事件分别去重 |
+| 突破回踩 | 已确认摆动位被收盘突破后，首次回踩并收盘守住关键位；按确认 K 的实际时间记录；若突破 K 与回踩确认 K 均有真实逐笔且方向不冲突，在详情里附加**仅两根**的成交佐证 | 默认**价格结构**，不把没有逐笔证据的回踩冒充订单流；详情不使用未来的结果 |
+
+原 `scanDoubles` 的 `makeReject` 含成本/最小盈亏比筛选及 `volAround(t)` 对下一根成交量的引用，因此不用于本模块的视觉形态判定。`patterns.ts` 实现只用已知收盘 K 线的确定性价格状态机；原扫描器保留给交易逻辑。`analyze.ts` 先产生真实/近似分开的候选，`projectSignals` 再按开关显示，因而开关立刻生效，不需要重新请求交易所。
+
+## 工程结构
+
+- `registerSignalPanel.tsx`：注册原生侧栏与独立 widget attachment；侧栏收起不停止运行器。
+- `store.ts`：每个工作区独立的类型开关、总开关、近似、预览与回看范围；配置校验并持久化到 `localStorage['pulsedesk.signal-annotations.v1']`。
+- `runtime.ts`：订阅 OKXProvider K 线与成交快照、市场切换即清空旧标注；约 1.2 秒合并更新。
+- `patterns.ts`：价格形态的因果检测（不管是否适合做单）。
+- `analyze.ts`：局部真实成交验证、连续真实 CVD、首次价格回踩事件与来源；`projectSignals` 应用显示开关。
+- `SignalPanel.tsx`、`signals.css`：类型、规则详情、最近标记、真实覆盖状态；`annotTypes.ts` / `annotLayer.ts` 画专属图层，不增删用户绘图。
+- 图层最多显示 160 条，最近列表 30 条；计数为分析范围内已识别数量，不是胜率、也不等于当前视口中可见的像素数。
+
+## 研究出处与适用范围
+
+1. [Lo, Mamaysky & Wang, *Foundations of Technical Analysis*, NBER w7613 (2000)](https://www.nber.org/papers/w7613)：可重复的自动形态识别/统计检验；样本是**历史美股日线**，不提供这里 OKX 5m 形态的收益证明。
+2. [Cont, Kukanov & Stoikov, *The Price Impact of Order Book Events*, JFE (2014)](https://arxiv.org/abs/1011.6402)：区分最佳档挂单新增/撤单/市场单的 OFI 与只含成交的买卖差。本项目未持续采集盘口事件，不声称实现真正 OFI。
+3. [Cartea, Donnelly & Jaimungal, *Enhancing trading strategies with order book signals*, Applied Mathematical Finance (2018)](https://kclpure.kcl.ac.uk/portal/en/publications/enhancing-trading-strategies-with-order-book-signals/)：纳斯达克限价订单簿量失衡的短时预测研究；不外推其表现到本项目的 taker 5m 标注。
+4. [Osler, *Stop-Loss Orders and Price Cascades in Currency Markets*, NY Fed SR150](https://www.newyorkfed.org/medialibrary/media/research/staff_reports/sr150.pdf)：外汇中的止损集群证据；这里没有止损委托数据，所以只称「诱多/诱空候选」，不宣称观察到了真实止损。
+5. [OKX 官方 API v5](https://app.okx.com/docs-v5/en/)：`trades.side` 为 taker 方向；合约 `sz` 单位是张；`confirm=0` 是未完结 K 线。
+6. [Bailey et al., *The Probability of Backtest Overfitting* (2014)](https://carmamaths.org/jon/backtest2.pdf)：提醒在小样本上调阈值的过拟合风险。本模块所有 ATR / 成交量阈值**未经走样本外校准**；不显示伪造概率。
+
+## 验证
+
+- `node scripts/run-ts-test.mjs tests/signal-logic.test.ts`：低盈亏比形态、收盘时点/未来数据、局部真实扫位、关键位成交反应、85% 覆盖边界、中性/推进侧成交、两腿推进比较、CVD 连续覆盖、缺口/代理命名、回踩首次确认与成交佐证。
+- `node scripts/run-ts-test.mjs tests/signal-annotations.test.ts`：开关与来源回归。
+- `npm run test:quant`：既有策略与标注排版回归。
+- `TEST_URL=http://127.0.0.1:3000/ node tests/signal-annotations.browser.mjs`：测试专用模拟 OKX REST/WS，不在生产入口中；实际 canvas、开关、市场切换、移动端和数据状态。

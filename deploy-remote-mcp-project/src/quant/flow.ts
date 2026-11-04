@@ -23,11 +23,22 @@ export interface FlowBar {
   trades?: number;
 }
 
+export interface FlowTrade {
+  ts: number;
+  side: 'buy' | 'sell';
+  /** 名义成交额（USDT） */
+  notional: number;
+}
+
 export interface FlowSnapshot {
   instId: string;
   period: string;
   barMs: number;
   bars: Map<number, FlowBar>;
+  /** 最近逐笔（环形，上限 1200）：用于大单主动方向等实时因子（可选以兼容既有快照构造） */
+  recent?: FlowTrade[];
+  /** 上次修复性回补时间，避免断线后频繁全量翻页 */
+  repairedAt?: number;
   /** 真实主动成交覆盖的最早 / 最晚 K 线时间 */
   from: number;
   to: number;
@@ -78,6 +89,7 @@ function emptySnapshot(instId: string, period: string): FlowSnapshot {
     period,
     barMs: PERIOD_MS[period] ?? 300_000,
     bars: new Map(),
+    recent: [],
     from: Infinity,
     to: 0,
     oiFrom: Infinity,
@@ -116,7 +128,7 @@ async function okxGet(base: string, path: string, params: Record<string, string>
 }
 
 // ─── 逐笔成交聚合 ─────────────────────────────────────────────
-interface Trade {
+export interface Trade {
   ts: number;
   px: number;
   sz: number;
@@ -124,8 +136,14 @@ interface Trade {
   tradeId: number;
 }
 
-function addTrades(snap: FlowSnapshot, trades: Trade[], ctVal: number, seen: Set<number>) {
+// Deduplication belongs to a snapshot, not the shared socket: every timeframe must
+// receive each trade once, including after releasing/reconnecting the socket.
+const seenBySnapshot = new WeakMap<FlowSnapshot, Set<number>>();
+export function aggregateFlowTrades(snap: FlowSnapshot, trades: Trade[], ctVal: number) {
+  let seen = seenBySnapshot.get(snap);
+  if (!seen) { seen = new Set<number>(); seenBySnapshot.set(snap, seen); }
   for (const t of trades) {
+    if (!(t.px > 0 && t.sz > 0) || !Number.isFinite(t.tradeId) || !Number.isFinite(t.ts)) continue;
     if (seen.has(t.tradeId)) continue;
     seen.add(t.tradeId);
     const ts = Math.floor(t.ts / snap.barMs) * snap.barMs;
@@ -138,6 +156,9 @@ function addTrades(snap: FlowSnapshot, trades: Trade[], ctVal: number, seen: Set
     }
     if (t.side === 'buy') bar.buy += notional;
     else bar.sell += notional;
+    const recent = (snap.recent ??= []);
+    recent.push({ ts: t.ts, side: t.side, notional });
+    if (recent.length > 1200) recent.splice(0, recent.length - 1200);
     bar.trades = (bar.trades ?? 0) + 1;
     snap.tape.trades++;
     snap.from = Math.min(snap.from, ts);
@@ -154,11 +175,12 @@ interface Tape {
   instId: string;
   ws: WebSocket | null;
   closed: boolean;
-  seen: Set<number>;
   snaps: Set<FlowSnapshot>;
   retry: ReturnType<typeof setTimeout> | null;
   ping: ReturnType<typeof setInterval> | null;
   rollover: ReturnType<typeof setTimeout> | null;
+  /** WS 断开过：需要一次修复性回补，否则断线窗口的 K 线永久退回 K 线近似 */
+  needsRepair: boolean;
 }
 const tapes = new Map<string, Tape>();
 
@@ -166,11 +188,12 @@ const tapes = new Map<string, Tape>();
 function ensureTape(instId: string, snap: FlowSnapshot) {
   let tape = tapes.get(instId);
   if (!tape) {
-    tape = { instId, ws: null, closed: false, seen: new Set(), snaps: new Set(), retry: null, ping: null, rollover: null };
+    tape = { instId, ws: null, closed: false, snaps: new Set(), retry: null, ping: null, rollover: null, needsRepair: false };
     tapes.set(instId, tape);
     openTape(tape);
   }
   tape.snaps.add(snap);
+  if (snap.tape.bootstrapped && !snap.tape.connected) tape.needsRepair = true;
   return tape;
 }
 
@@ -186,23 +209,24 @@ function openTape(tape: Tape) {
   tape.ws = ws;
   const ctVal = ctValOf(tape.instId);
   ws.onopen = () => {
+    if (tape.closed) { ws.close(); return; }
     ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'trades', instId: tape.instId }] }));
     tape.ping = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('ping'), 25_000);
     tape.snaps.forEach(s => {
       s.tape.connected = true;
+      notify(s);
     });
   };
   ws.onmessage = ev => {
-    if (ev.data === 'pong') return;
+    if (tape.closed || ev.data === 'pong') return;
     try {
       const msg = JSON.parse(ev.data as string) as { arg?: { channel?: string }; data?: unknown[] };
       if (msg.arg?.channel !== 'trades' || !Array.isArray(msg.data)) return;
       const trades = parseTrades(msg.data);
       for (const s of tape.snaps) {
-        const before = s.to;
-        addTrades(s, trades, ctVal, tape.seen);
-        // 新 K 线开始：上一根已完整 → 稍后通知重算（给迟到成交 1.5s）
-        if (s.to > before && before > 0 && !tape.rollover) {
+        aggregateFlowTrades(s, trades, ctVal);
+        // Coalesce live ticks: refresh evidence/optional preview without a React render per trade.
+        if (trades.length && !tape.rollover) {
           tape.rollover = setTimeout(() => {
             tape.rollover = null;
             tape.snaps.forEach(notify);
@@ -218,8 +242,12 @@ function openTape(tape: Tape) {
     tape.ping = null;
     tape.snaps.forEach(s => {
       s.tape.connected = false;
+      notify(s);
     });
-    if (!tape.closed) tape.retry = setTimeout(() => openTape(tape), 2000);
+    if (!tape.closed) {
+      tape.needsRepair = true;
+      tape.retry = setTimeout(() => openTape(tape), 2000);
+    }
   };
   ws.onerror = () => ws.close();
 }
@@ -229,6 +257,7 @@ export function releaseTape(instId: string) {
   const tape = tapes.get(instId);
   if (!tape) return;
   tape.closed = true;
+  tape.snaps.forEach(s => { s.tape.connected = false; notify(s); });
   if (tape.retry) clearTimeout(tape.retry);
   if (tape.ping) clearInterval(tape.ping);
   if (tape.rollover) clearTimeout(tape.rollover);
@@ -245,12 +274,14 @@ async function bootstrapTape(snap: FlowSnapshot, tape: Tape, minTs: number, maxP
   const ctVal = ctValOf(snap.instId);
   let after: number | undefined;
   for (let p = 0; p < maxPages; p++) {
+    if (signal?.aborted || tape.closed) return;
     const params: Record<string, string> = { instId: snap.instId, limit: String(PAGE), type: '1' };
     if (after) params.after = String(after);
     const rows = await okxGet(REST, '/api/v5/market/history-trades', params, signal);
     const trades = parseTrades(rows);
     if (!trades.length) break;
-    addTrades(snap, trades, ctVal, tape.seen);
+    if (signal?.aborted || tape.closed) return;
+    aggregateFlowTrades(snap, trades, ctVal);
     const oldest = trades.reduce((m, t) => (t.tradeId < m.tradeId ? t : m), trades[0]);
     after = oldest.tradeId;
     if (oldest.ts <= minTs) break;
@@ -332,8 +363,16 @@ export function syncFlow(
         await syncRubik(snap, base, opts.minTs, opts.maxPages ?? 16, opts.oiPages ?? 12, opts.signal);
         snap.complete = true;
       }
+      if (opts.signal?.aborted) return snap;
       if (typeof window !== 'undefined') {
         const tape = ensureTape(instId, snap);
+        if (snap.tape.bootstrapped && shouldRepairFlow(snap, tape.needsRepair)) {
+          // 断线 / 快照滞后：只回补最近 2 根（页数封顶），补齐缺口而不是重做全量回填
+          const repairMin = Math.floor(Date.now() / snap.barMs) * snap.barMs - 2 * snap.barMs;
+          await bootstrapTape(snap, tape, repairMin, 24, opts.signal);
+          tape.needsRepair = false;
+          snap.repairedAt = Date.now();
+        }
         if (!snap.tape.bootstrapped) {
           // 回补最近 targetBars 根完整 K 线（5m 默认 8 根 ≈ 40 分钟；BTC 约 12 页 / 根）
           const targetBars = opts.bootstrapBars ?? 8;
@@ -343,7 +382,7 @@ export function syncFlow(
         snap.complete = true;
       }
     } catch (e) {
-      console.warn('[订单流] OKX 同步失败：', e);
+      if (!opts.signal?.aborted) console.warn('[订单流] OKX 同步失败：', e);
     }
     notify(snap);
     return snap;
@@ -351,6 +390,50 @@ export function syncFlow(
   inflight.set(key, job);
   job.finally(() => inflight.delete(key));
   return job;
+}
+
+/**
+ * 是否需要修复性回补：WS 断开过，或最新聚合 K 线落后当前时间超过 2 个周期；
+ * 两次回补之间至少间隔一个周期，避免低流动品种反复翻页。
+ */
+export function shouldRepairFlow(
+  snap: Pick<FlowSnapshot, 'to' | 'barMs' | 'repairedAt'>,
+  needsRepair: boolean,
+  now = Date.now(),
+): boolean {
+  const stale = snap.to > 0 && now - snap.to > snap.barMs * 2;
+  if (!needsRepair && !stale) return false;
+  return now - (snap.repairedAt ?? 0) > snap.barMs;
+}
+
+/**
+ * 大单主动方向（tapeBias 因子数据源）：
+ * 取最近 windowMs 内逐笔，按成交额 90 分位定义“大单”，返回 (买−卖)/(买+卖) ∈ [-1,1]。
+ * 样本不足或窗口内没有成交时返回 null —— 缺数据不臆测，与证据模型原则一致。
+ */
+export function bigBiasOf(
+  trades: FlowTrade[],
+  now = Date.now(),
+  windowMs = 120_000,
+): { bias: number | null; count: number; threshold: number } {
+  const win = trades.filter(t => t.ts >= now - windowMs && t.notional > 0);
+  if (win.length < 30) return { bias: null, count: 0, threshold: 0 };
+  const sorted = win.map(t => t.notional).sort((a, b) => a - b);
+  const threshold = sorted[Math.min(sorted.length - 1, Math.floor(0.9 * (sorted.length - 1)))];
+  // 注意必须严格大于分位值：大量相同小额成交时，>= 会把全部样本都算成“大单”，
+  // 使 tapeBias 退化为全量 delta。分位过滤为空时退回成交额最高的 10% 笔。
+  let big = win.filter(t => t.notional > threshold);
+  if (big.length < 3) {
+    big = [...win].sort((a, b) => b.notional - a.notional).slice(0, Math.max(3, Math.floor(win.length * 0.1)));
+  }
+  let buy = 0;
+  let sell = 0;
+  for (const t of big) {
+    if (t.side === 'buy') buy += t.notional;
+    else sell += t.notional;
+  }
+  if (!big.length || buy + sell <= 0) return { bias: null, count: 0, threshold };
+  return { bias: (buy - sell) / (buy + sell), count: big.length, threshold };
 }
 
 /**

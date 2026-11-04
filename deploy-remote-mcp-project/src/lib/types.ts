@@ -141,6 +141,8 @@ export interface TradedSignal {
   pnlPct?: number;
   costR?: number;
   holdingBars?: number;
+  // 保持与 remote 原始 summarize 的类型契约一致（tp/sl/time）。
+  // 保本离场等更细的退出原因由 quant 层 Outcome.why 表达，并在记录上附加 exitWhy。
   exitReason?: "tp" | "sl" | "time";
 }
 

@@ -57,19 +57,31 @@ function annotate(sig: ScanSignal, proba: number, mode: EntryMode) {
 }
 
 /**
+ * 回测可选覆盖项：服务端（Next 路由）拿不到浏览器 localStorage，
+ * 由调用方显式传入用户在 UI 上设置的门槛 / 入场方式 / 是否替换结构质量过滤。
+ */
+export interface EngineBacktestOptions extends BacktestOptions {
+  threshold?: number;
+  entryMode?: EntryMode;
+  replaceConfFilter?: boolean;
+}
+
+/**
  * 回测入口：与远程引擎同名同签名，因此远程 route / 统计面板无需改动即可享受门槛。
  */
 export function simulate(
   cs: Candle[],
   symbol: string,
   bar: string,
-  opts: BacktestOptions,
+  opts: EngineBacktestOptions,
   p: DoubleParams = DEFAULT_PARAMS,
   confMin = CONF_MIN,
 ): TradedSignal[] {
   const cfg = getConfig();
-  const mode: EntryMode = cfg.entryMode;
-  const threshold = opts.flowFilter ? Math.min(0.9, cfg.threshold + 0.05) : cfg.threshold;
+  const mode: EntryMode = opts.entryMode ?? cfg.entryMode;
+  const baseThreshold = opts.threshold ?? cfg.threshold;
+  const replaceConf = opts.replaceConfFilter ?? cfg.replaceConfFilter;
+  const threshold = opts.flowFilter ? Math.min(0.9, baseThreshold + 0.05) : baseThreshold;
   const ctx = buildContext(cs);
   const maxHold = maxHoldOf(bar);
   const { signals } = scanDoubles(cs, paramsFor(mode, p));
@@ -94,7 +106,8 @@ export function simulate(
       geo: s.geo,
       status: 'skipped',
     };
-    if (opts.flowFilter && s.conf < confMin) continue; // 原结构质量门槛仍然生效
+    // replaceConfFilter=true：概率门槛取代 CONF_MIN；false：保留原结构质量过滤
+    if (opts.flowFilter && !replaceConf && s.conf < confMin) continue;
     if (!cand.outcome) continue;
     if (cand.proba < threshold || !cand.outcome.filled) {
       recs.push({
@@ -120,8 +133,10 @@ export function simulate(
       pnlPct: o.pnlPct,
       costR: o.costR,
       holdingBars: o.holdingBars,
-      exitReason: o.why === 'gap' ? 'time' : o.why,
-      ...({ proba: cand.proba, grade: cand.grade, evidence: cand.evidence, rr: cand.rr } as Record<string, unknown>),
+      // 原始 TradedSignal.exitReason 只有 tp/sl/time；保本(be)归入 time 以兼容 remote 统计，
+      // 真实退出原因通过 exitWhy 保留（quant 层 Outcome.why 本身就区分 be）。
+      exitReason: o.why === 'gap' || o.why === 'be' ? 'time' : o.why,
+      ...({ proba: cand.proba, grade: cand.grade, evidence: cand.evidence, rr: cand.rr, exitWhy: o.why } as Record<string, unknown>),
     } as TradedSignal);
   }
   return recs;

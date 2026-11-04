@@ -88,7 +88,7 @@ function setup(canvas: HTMLCanvasElement | null, args: RendererLayerArgs, indexO
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const p = args.data as AnnPayload | undefined;
   if (!p || !bars.length) return null;
-  if (!p.levels.length && !p.events.length && !p.zones.length && !p.position) return null;
+  if (!p.levels.length && !p.events.length && !p.zones.length && !p.paths?.length && !p.position) return null;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const W = coords.width;
   const plot: Rect = { x: 0, y: bounds.top, w: W, h: bounds.height };
@@ -413,6 +413,7 @@ function renderEvents(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, st
 function renderZones(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, string>) {
   const { ctx, X, Y, plot, occ } = f;
   for (const z of [...f.p.zones].sort((a, b) => b.priority - a.priority)) {
+    if (!z.text) continue;
     const x0 = Math.max(0, X(z.fromTs));
     const x1 = Math.min(f.W, X(z.toTs));
     const y0 = Y(z.hi);
@@ -485,6 +486,7 @@ export function registerAnnotLayers() {
       return {
         mount(c) {
           canvas = c;
+          c.dataset.annotationLayer = ANNOT_UNDER;
         },
         render(args) {
           const f = setup(canvas, args, indexOf);
@@ -506,6 +508,7 @@ export function registerAnnotLayers() {
       return {
         mount(c) {
           canvas = c;
+          c.dataset.annotationLayer = ANNOT_OVER;
         },
         render(args) {
           const f = setup(canvas, args, indexOf);

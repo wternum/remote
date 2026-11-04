@@ -15,6 +15,8 @@ export interface Summary {
   tpRate: number;
   slRate: number;
   timeRate: number;
+  /** 1R 后保本离场的占比（此前被错误并入 timeRate） */
+  beRate: number;
   payoff: number;
   /** 单笔收益标准差（R），衡量策略稳定性 */
   volR: number;
@@ -58,6 +60,7 @@ const EMPTY: Summary = {
   tpRate: 0,
   slRate: 0,
   timeRate: 0,
+  beRate: 0,
   payoff: 0,
   volR: 0,
   sharpeR: 0,
@@ -79,6 +82,7 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
   let tp = 0;
   let sl = 0;
   let time = 0;
+  let be = 0;
   let hold = 0;
   let cum = 0;
   let peak = 0;
@@ -96,6 +100,7 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
     }
     if (o.why === 'tp') tp++;
     else if (o.why === 'sl') sl++;
+    else if (o.why === 'be') be++;
     else time++;
     hold += o.holdingBars;
     cum += r;
@@ -121,6 +126,7 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
     tpRate: (tp / n) * 100,
     slRate: (sl / n) * 100,
     timeRate: (time / n) * 100,
+    beRate: (be / n) * 100,
     payoff: avgLoss > 0 ? avgWin / avgLoss : avgWin > 0 ? 99 : 0,
     volR: sd,
     sharpeR: sd > 0 ? avgR / sd : 0,

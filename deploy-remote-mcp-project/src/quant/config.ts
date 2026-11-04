@@ -42,12 +42,59 @@ function read(): EngineConfig {
   }
 }
 
+// 服务端（Next 路由）读不到 localStorage，因此把同一份配置镜像到非敏感 cookie，
+// 让 /api/backtest 等服务端回测使用与 UI 完全相同的门槛 / 入场方式。
+export const CONFIG_COOKIE = 'pulsedesk.confirm-engine';
+
+export interface EngineConfigOverrides {
+  threshold?: number;
+  entryMode?: EntryMode;
+  replaceConfFilter?: boolean;
+}
+
+function writeCookie(cfg: EngineConfig) {
+  try {
+    if (typeof document === 'undefined') return;
+    const value = encodeURIComponent(
+      JSON.stringify({ t: cfg.threshold, m: cfg.entryMode, r: cfg.replaceConfFilter ? 1 : 0 }),
+    );
+    document.cookie = `${CONFIG_COOKIE}=${value}; path=/; max-age=31536000; samesite=lax`;
+  } catch {
+    /* 隐私模式忽略 */
+  }
+}
+
+/** 从 Cookie 头还原配置（仅服务端路由使用；非法内容一律忽略） */
+export function configFromCookie(header: string | null | undefined): EngineConfigOverrides {
+  if (!header) return {};
+  try {
+    const part = header
+      .split(';')
+      .map(s => s.trim())
+      .find(s => s.startsWith(`${CONFIG_COOKIE}=`));
+    if (!part) return {};
+    const raw = JSON.parse(decodeURIComponent(part.slice(CONFIG_COOKIE.length + 1))) as {
+      t?: number;
+      m?: string;
+      r?: number;
+    };
+    const out: EngineConfigOverrides = {};
+    if (typeof raw.t === 'number' && Number.isFinite(raw.t)) out.threshold = clampThreshold(raw.t);
+    if (raw.m === 'touch' || raw.m === 'confirm') out.entryMode = raw.m;
+    if (raw.r === 0 || raw.r === 1) out.replaceConfFilter = raw.r === 1;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 function write(cfg: EngineConfig) {
   try {
     localStorage.setItem(KEY, JSON.stringify(cfg));
   } catch {
     /* 隐私模式忽略 */
   }
+  writeCookie(cfg);
 }
 
 export function getConfig(): EngineConfig {
