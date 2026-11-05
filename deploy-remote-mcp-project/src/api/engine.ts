@@ -109,7 +109,7 @@ export async function GET(req: Request) {
       // Node can use OKX rubik's official taker/OI history.  Bound the
       // pagination so a panel request does not turn into an unbounded history
       // download; uncovered older bars remain explicitly approximate.  In the
-      // browser, reuse the snapshot maintained by useFlow instead of starting
+      // browser, reuse the snapshot maintained by the signal workspace runtime instead of starting
       // a second tape/bootstrap loop.
       let flowSnapshot: FlowSnapshot | null = null;
       if (live && candles.length) {

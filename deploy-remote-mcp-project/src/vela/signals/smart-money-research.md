@@ -1,3 +1,5 @@
+> 资料性质：历史研究/实施规格，不是当前接口清单或收益证明。当前独立成交/陷阱/CVD/SMC条目已并入M/W统一详情，实际规则与接线以 [模块说明](README.md) 和 `mwStory.ts` 为准。
+
 # 关键位「聪明钱结构」观察：定义、适配与边界
 
 > 本文配套实现 `src/quant/smartmoney.ts` 与侧栏类型「聪明钱结构」（`SignalType: smartMoney`）。

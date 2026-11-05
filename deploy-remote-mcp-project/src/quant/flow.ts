@@ -65,7 +65,7 @@ const PAGE = 100;
 
 const cache = new Map<string, FlowSnapshot>();
 const listeners = new Set<(snap: FlowSnapshot) => void>();
-const inflight = new Map<string, Promise<FlowSnapshot>>();
+const inflight = new Map<string, { promise: Promise<FlowSnapshot>; signal?: AbortSignal }>();
 
 export const PERIOD_MS: Record<string, number> = { '5m': 300_000, '15m': 900_000, '30m': 1_800_000, '1H': 3_600_000, '2H': 7_200_000, '4H': 14_400_000 };
 
@@ -430,10 +430,16 @@ export function syncFlow(
 ): Promise<FlowSnapshot> {
   const key = flowKey(instId, period);
   const running = inflight.get(key);
-  if (running) return running;
+  // 已被中止的任务不能再当作「正在同步」复用：releaseTape 会关掉并删除实时成交流，
+  // 若继续等待旧任务（最多 300 页回补）自行结束，重新开启标注后成交流会长时间不重连，
+  // 侧栏一直停在「等待成交流」，所有订单流类标注拿不到真实覆盖。
+  if (running && !running.signal?.aborted) return running.promise;
   const job = (async () => {
     const snap = cache.get(key) ?? emptySnapshot(instId, period);
     cache.set(key, snap);
+    if (opts.signal?.aborted) return snap;
+    // Establish the live connection before waiting for paginated historical statistics.
+    const liveTape = typeof window !== 'undefined' ? ensureTape(instId, snap) : null;
     const base = rubikBase();
     try {
       // 失败冷却：无代理的静态环境里 rubik 恒失败，避免每 30s 重复全量翻页空转。
@@ -444,15 +450,18 @@ export function syncFlow(
         try {
           await syncRubik(snap, base, opts.minTs, opts.maxPages ?? 16, opts.oiPages ?? 12, opts.signal);
           snap.rubikComplete = true;
+          snap.rubikFailedAt = 0;
           snap.complete = true;
         } catch (e) {
-          snap.rubikFailedAt = Date.now();
-          if (!opts.signal?.aborted) console.warn('[订单流] rubik 统计不可用，改用逐笔成交：', e);
+          if (!opts.signal?.aborted) {
+            snap.rubikFailedAt = Date.now();
+            console.warn('[订单流] rubik 统计不可用，改用逐笔成交：', e);
+          }
         }
       }
       if (opts.signal?.aborted) return snap;
-      if (typeof window !== 'undefined') {
-        const tape = ensureTape(instId, snap);
+      if (liveTape) {
+        const tape = liveTape;
         if (snap.tape.bootstrapped && shouldRepairFlow(snap, tape.needsRepair)) {
           // 断线 / 快照滞后：只回补最近 2 根（页数封顶），补齐缺口而不是重做全量回填
           const repairMin = Math.floor(Date.now() / snap.barMs) * snap.barMs - 2 * snap.barMs;
@@ -474,8 +483,10 @@ export function syncFlow(
     notify(snap);
     return snap;
   })();
-  inflight.set(key, job);
-  job.finally(() => inflight.delete(key));
+  inflight.set(key, { promise: job, signal: opts.signal });
+  job.finally(() => {
+    if (inflight.get(key)?.promise === job) inflight.delete(key);
+  });
   return job;
 }
 

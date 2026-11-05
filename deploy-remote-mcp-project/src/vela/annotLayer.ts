@@ -439,10 +439,12 @@ function renderZones(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, str
 
 function renderCard(f: Frame, hit: Hit, cursor: { x: number; y: number }) {
   const { ctx, plot } = f;
-  const maxW = 260;
+  const maxW = Math.max(80, Math.min(300, plot.w - 16));
   const measure = (s: string) => textW(ctx, s, FONT_CARD);
-  const lines = hit.lines.flatMap(l => wrapText(l, maxW - 16, measure));
+  let lines = hit.lines.flatMap(l => wrapText(l, maxW - 16, measure));
   const titleLines = wrapText(hit.title, maxW - 16, s => textW(ctx, s, FONT_BOLD));
+  const lineBudget = Math.max(1, Math.floor((plot.h - 30 - titleLines.length * 15) / 14));
+  if (lines.length > lineBudget) lines = [...lines.slice(0, Math.max(0, lineBudget - 1)), '更多证据请展开侧栏形态详情。'];
   const w = Math.min(maxW, Math.max(...titleLines.map(s => textW(ctx, s, FONT_BOLD)), ...lines.map(measure), 60) + 16);
   const h = 8 + titleLines.length * 15 + (lines.length ? 4 + lines.length * 14 : 0) + 6;
   const r = placeCard(cursor, w, h, plot);

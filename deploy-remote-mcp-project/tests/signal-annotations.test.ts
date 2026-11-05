@@ -14,12 +14,13 @@ const inverted = analyzeSignals(bottom, ms, prefs, annotationFlow(bottom, 0.85),
 assert.ok(analysis.items.some(i => i.type === 'doubleTop'), 'double-top fixture must produce a confirmed price structure');
 assert.ok(inverted.items.some(i => i.type === 'doubleBottom'), 'mirrored fixture must produce a confirmed price structure');
 assert.ok(analysis.items.some(i => i.type === 'deltaImpulse' && i.source === 'real'));
-const call = analysis.items.find(i => i.type === 'keyLevelScenario');
+const call = analysis.items.find(i => i.story);
 assert.ok(call, 'recent M/W must produce a key-level call');
-assert.ok(call.levels?.length === 1 && call.levels[0].label === true, 'the call is a labelled line on the key level');
+assert.ok(call.levels?.length === 2 && call.levels[0].label === true, 'the call is a labelled line on the key level');
 assert.equal(call.levels[0].price, call.price, 'label sits exactly on the level');
 assert.ok(call.levels[0].name.length > 0);
-assert.ok(call.detail[0].startsWith('结论：'), 'hover opens with the verdict (trap / pullback / bias)');
+assert.equal(call.story!.sections[0].title, '当前结论');
+assert.equal(call.story!.sections.length, 6);
 console.log('PASS price-only M/W detector, real taker imbalance and labelled key-level verdict');
 
 const projected = projectSignals(analysis, prefs);
@@ -64,8 +65,8 @@ console.log('PASS forming-bar previews are opt-in and disappear when the conditi
 
 const atConfirmation = analyzeSignals(top.slice(0, 71), ms, prefs, annotationFlow(top), top[70].ts + ms);
 assert.ok(atConfirmation.items.some(i => i.type === 'doubleTop'));
-const stableBefore = atConfirmation.items.filter(i => i.type === 'doubleTop').map(i => i.event);
-const stableAfter = analysis.items.filter(i => i.type === 'doubleTop').map(i => i.event);
+const stableBefore = atConfirmation.items.filter(i => i.type === 'doubleTop').map(i => ({ origin: i.story!.origin, evidence: i.story!.evidence, path: i.path }));
+const stableAfter = analysis.items.filter(i => i.type === 'doubleTop').map(i => ({ origin: i.story!.origin, evidence: i.story!.evidence, path: i.path }));
 assert.deepEqual(stableAfter, stableBefore);
 assert.ok(analysis.items.every(i => i.path?.points.every(p => p.ts <= i.ts) ?? true));
 console.log('PASS confirmed structural markers do not borrow future candles');

@@ -92,26 +92,21 @@ const prefs: SignalPreferences = {
 
   // 覆盖达到 95% 才允许附加成交佐证。
   const coveredAnalysis = analyzeSignals(cs, MS, prefs, flow, NOW);
-  const item = coveredAnalysis.items.find(i => i.type === 'smartMoney');
-  if (item) {
-    assert.equal(item.source, 'real', '完整真实覆盖时 SMC 来源应为真实逐笔');
-    assert.ok(item.detail.every(l => l.startsWith('✓ ')) && item.detail.length <= 6, 'SMC 悬停只列命中项');
-  }
+  const item = coveredAnalysis.items.find(i => i.story)?.story?.smc;
+  if (item) { assert.equal(item.source, 'real'); assert.ok(item.lines.length <= 6); }
   pass('无真实成交时只输出价格结构，且不会伪造成交佐证');
 }
 
-// ── 5. 侧栏注册与开关独立 ─────────────────────────────────────
+// Structure context enriches the same M/W record, never duplicates it.
 {
-  assert.ok(SIGNAL_TYPES.some(t => t.id === 'smartMoney' && t.group === 'structure'));
-  const analysis = analyzeSignals(annotationCandles(true, 90, NOW), MS, prefs, annotationFlow(annotationCandles(true, 90, NOW), 0.85), NOW);
-  const on = projectSignals(analysis, prefs);
-  const off = projectSignals(analysis, { ...prefs, selected: { ...prefs.selected, smartMoney: false } });
-  if (analysis.items.some(i => i.type === 'smartMoney')) {
-    assert.ok(on.visible.some(i => i.type === 'smartMoney'));
-    assert.ok(!off.visible.some(i => i.type === 'smartMoney'));
-    assert.ok(off.visible.some(i => i.type === 'doubleTop'), '关闭 SMC 不应影响 M/W 结构');
-  }
-  pass('聪明钱结构已注册为独立开关，不影响价格结构标注');
+  assert.ok(SIGNAL_TYPES.some(t=>t.id==='smartMoney' && t.group==='context'));
+  const cs=annotationCandles(true,90,NOW);
+  const analysis=analyzeSignals(cs,MS,prefs,annotationFlow(cs,.85),NOW);
+  const story=analysis.items.find(i=>i.story)!.story!;
+  assert.ok(story.smc);assert.equal(story.smc!.source,'real');
+  const on=projectSignals(analysis,prefs),off=projectSignals(analysis,{...prefs,selected:{...prefs.selected,smartMoney:false}});
+  assert.deepEqual(on.visible.map(i=>i.id),off.visible.map(i=>i.id));
+  assert.ok(off.visible.some(i=>i.type==='doubleTop'));
+  pass('结构补充只 enrich 同一形态，不生成重复记录，不影响主判读');
 }
-
-console.log(`\nsmartmoney: ${passed} 组断言全部通过`);
+console.log(`smartmoney: ${passed} groups passed`);

@@ -1,133 +1,34 @@
 import type { Candle } from '@/lib/types';
-import { buildContext, type Ctx } from '@/quant/context';
+import { buildContext } from '@/quant/context';
 import type { FlowSnapshot } from '@/quant/flow';
-import { findSwingLevels, readBreakout, windowFlow } from '@/quant/orderflow';
-import { readSmartMoney } from '@/quant/smartmoney';
+import { findSwingLevels, readBreakout } from '@/quant/orderflow';
 import { decimalsFor, type AnnPayload, type AnnTone } from '../annotTypes';
-import { annotationTolerance, scanAnnotationPatterns, type AnnotationPattern } from './patterns';
-import { buildKeyLevelCalls, keyLevelCallItems } from './keyLevelCall';
-import { emptyCounts, emptySignalPayload, SOURCE_LABELS, type SignalItem, type SignalPreferences, type SignalSource, type SignalType } from './store';
+import { annotationTolerance, scanAnnotationPatterns } from './patterns';
+import { buildMwStories, selectMwStories } from './mwStory';
+import { money, pct, takerObservation } from './evidence';
+import { emptyCounts, emptySignalPayload, type SignalItem, type SignalPreferences, type SignalSource } from './store';
+export { takerObservation, legFlow } from './evidence';
 
-const pct = (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
-const money = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(2)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0);
 const priceText = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: decimalsFor(n), maximumFractionDigits: decimalsFor(n) });
-const priceAt = (cs: Candle[], i: number) => cs[i];
-const positive = (v: number) => Number.isFinite(v) && v > 0;
-
-/** A taker-side buy/sell ratio for ONE fully covered candle; never use the OHLC proxy here. */
-function takerRatio(ctx: Ctx, flow: FlowSnapshot | null | undefined, i: number): number | null {
-  const bar = flow?.bars.get(ctx.cs[i]?.ts);
-  if (!bar || ctx.real[i] !== 1 || !positive(bar.buy + bar.sell)) return null;
-  return (bar.buy - bar.sell) / (bar.buy + bar.sell);
-}
-
-export interface TakerObservation {
-  buy: number;
-  sell: number;
-  total: number;
-  delta: number;
-  ratio: number;
-  /** OKX official aggregated statistics or browser per-trade aggregation. */
-  src: 'rubik' | 'tape';
-  /** Taker total divided by candle quote turnover; see hasRealFlow for source-specific limits. */
-  coverage: number;
-  volRatio: number;
-}
-
-/** Full raw observation for one candle. Returns null rather than a neutral zero when coverage is incomplete. */
-export function takerObservation(ctx: Ctx, flow: FlowSnapshot | null | undefined, i: number): TakerObservation | null {
-  const candle = ctx.cs[i];
-  const bar = flow?.bars.get(candle?.ts);
-  if (!candle || !bar || ctx.real[i] !== 1 || !positive(bar.buy + bar.sell)) return null;
-  const total = bar.buy + bar.sell;
-  return {
-    buy: bar.buy,
-    sell: bar.sell,
-    total,
-    delta: bar.buy - bar.sell,
-    ratio: (bar.buy - bar.sell) / total,
-    src: bar.src,
-    coverage: candle.v > 0 ? total / candle.v : 0,
-    volRatio: ctx.volMa[i] > 0 ? candle.v / ctx.volMa[i] : 0,
-  };
-}
-
-export interface LegFlow {
-  from: number;
-  to: number;
-  bars: number;
+const hhmmOf = (ts: number) => new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC';
+export interface SignalAnalysis {
+  items: SignalItem[];
   covered: number;
-  complete: boolean;
-  buy: number;
-  sell: number;
-  total: number;
-  delta: number;
-  ratio: number | null;
+  /** 实际纳入分析的已收盘根数（可能被历史缺口截断，小于 requested） */
+  bars: number;
+  /** 用户请求的回看根数 */
+  requested: number;
+  /** 历史缺口把分析范围截断到最新连续段 */
+  gapTruncated: boolean;
+  lastPrice: number;
 }
-
-/**
- * Aggregate one price-push leg only when every candle is timestamp-contiguous
- * and fully covered by real taker trades. Partial legs retain their covered
- * count for display, but deliberately expose no ratio.
- */
-export function legFlow(ctx: Ctx, flow: FlowSnapshot | null | undefined, from: number, to: number, barMs: number): LegFlow {
-  const start = Math.max(0, Math.min(from, to));
-  const end = Math.min(ctx.n - 1, Math.max(from, to));
-  let covered = 0;
-  let buy = 0;
-  let sell = 0;
-  let complete = end >= start;
-  for (let i = start; i <= end; i++) {
-    if (i > start && ctx.cs[i].ts - ctx.cs[i - 1].ts !== barMs) complete = false;
-    const obs = takerObservation(ctx, flow, i);
-    if (!obs) {
-      complete = false;
-      continue;
-    }
-    covered++;
-    buy += obs.buy;
-    sell += obs.sell;
-  }
-  const total = buy + sell;
-  return {
-    from: start,
-    to: end,
-    bars: Math.max(0, end - start + 1),
-    covered,
-    complete: complete && covered === Math.max(0, end - start + 1) && total > 0,
-    buy,
-    sell,
-    total,
-    delta: buy - sell,
-    ratio: complete && covered === Math.max(0, end - start + 1) && total > 0 ? (buy - sell) / total : null,
-  };
-}
-
-/** Continuous actual taker data is required for any cumulative-volume-delta comparison. */
-function realCvdBetween(ctx: Ctx, flow: FlowSnapshot | null | undefined, first: number, second: number, barMs: number): number | null {
-  if (first < 0 || second <= first || second >= ctx.n) return null;
-  let volume = 0;
-  let delta = 0;
-  for (let i = first; i <= second; i++) {
-    const bar = flow?.bars.get(ctx.cs[i].ts);
-    if (ctx.real[i] !== 1 || !bar || !positive(bar.buy + bar.sell)) return null;
-    if (i > first) {
-      if (ctx.cs[i].ts - ctx.cs[i - 1].ts !== barMs) return null;
-      volume += bar.buy + bar.sell;
-      delta += bar.buy - bar.sell;
-    }
-  }
-  return volume > 0 ? delta / volume : null;
-}
-
-export interface SignalAnalysis { items: SignalItem[]; covered: number; bars: number; lastPrice: number }
 
 /**
  * Causal visual annotations, not an execution strategy. ATR/volume cutoffs below
  * are explicit heuristics and have NOT been calibrated as winning probabilities.
  */
 export function analyzeSignals(candles: Candle[], barMs: number, preferences: SignalPreferences, flow?: FlowSnapshot | null, now = Date.now()): SignalAnalysis {
-  if (!(barMs > 0) || !Number.isFinite(now)) return { items: [], covered: 0, bars: 0, lastPrice: 0 };
+  if (!(barMs > 0) || !Number.isFinite(now)) return { items: [], covered: 0, bars: 0, requested: preferences.lookback, gapTruncated: false, lastPrice: 0 };
   const valid = candles.filter(c =>
     [c.ts, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite) && c.ts <= now && c.v >= 0 &&
     c.o > 0 && c.c > 0 && c.h >= Math.max(c.o, c.c) && c.l <= Math.min(c.o, c.c) && c.l > 0,
@@ -145,231 +46,16 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   // 形成中 K 线只用于盘中预警；所有形态判定仍用上面过滤出的 closed。
   const forming = cs.length > 0 && newest && newest.ts === cs[cs.length - 1].ts + barMs && newest.ts + barMs > now
     ? newest : undefined;
-  if (cs.length < 30) return { items: [], covered: 0, bars: inScope.length, lastPrice };
+  if (cs.length < 30) return { items: [], covered: 0, bars: inScope.length, requested: preferences.lookback, gapTruncated: contiguousStart > 0 && inScope.length < preferences.lookback, lastPrice };
   const ctx = buildContext(cs, flow);
   const cutoff = inScope[0]?.ts ?? 0;
   const items: SignalItem[] = [];
   const patterns = scanAnnotationPatterns(ctx);
 
-  for (const pattern of patterns) {
-    const { idx, first, second, level, neck } = pattern;
-    const c = priceAt(cs, idx);
-    if (c.ts < cutoff) continue;
-    const top = pattern.side === 'top';
-    const type: SignalType = top ? 'doubleTop' : 'doubleBottom';
-    const tone: AnnTone = top ? 'short' : 'long';
-    const label = top ? '双顶' : '双底';
-    const fromTs = priceAt(cs, first).ts;
-    const key = `${type}:${fromTs}:${c.ts}`;
-    const detail = [
-      `第一次极值 ${priceText(level)} · 中间颈线 ${priceText(neck)}`,
-      `第二次测试 ${priceText(pattern.secondPrice)} · 收盘${top ? '拒绝于' : '收回于'} ${priceText(c.c)}`,
-      `这里确认的是二次测试，不是趋势反转；颈线尚需后续收盘突破。`,
-    ];
-    items.push({
-      id: key, type, ts: c.ts, fromTs, price: level, title: label, detail, source: 'price', confirmed: true, tone,
-      event: { id: `pattern:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone, text: label, marker: 'tri', priority: 80, title: label, detail },
-      levels: [
-        { id: `pattern:${key}:level`, name: top ? '双顶阻力' : '双底支撑', fromTs, toTs: c.ts, price: level, tone, style: 'solid', rank: 'normal', priority: 56, label: false },
-        { id: `pattern:${key}:neck`, name: '颈线', fromTs, toTs: c.ts, price: neck, tone: 'neck', style: 'dotted', rank: 'normal', priority: 52, label: false },
-      ],
-      path: { tone, points: [
-        { ts: fromTs, price: level },
-        { ts: priceAt(cs, pattern.neckIdx).ts, price: neck },
-        { ts: priceAt(cs, second).ts, price: pattern.secondPrice },
-        ...(idx !== second ? [{ ts: c.ts, price: c.c }] : []),
-      ] },
-    });
-
-    // Independent key-level context: this reports what actually traded at the
-    // second test. It deliberately does not require the stronger trap rules.
-    const testObs = takerObservation(ctx, flow, second);
-    const confirmObs = takerObservation(ctx, flow, idx);
-    if (testObs || confirmObs) {
-      const dir = top ? -1 : 1;
-      const testAligned = testObs ? testObs.ratio * dir : null;
-      const confirmAligned = confirmObs ? confirmObs.ratio * dir : null;
-      const testCandle = priceAt(cs, second);
-      const sweepDepth = (top ? testCandle.h - level : level - testCandle.l) / Math.max(ctx.atr[idx], 1e-9);
-      const closedInside = top ? c.c < level : c.c > level;
-      let stance = '主动成交接近中性';
-      if (testObs && confirmObs) {
-        if (testAligned! >= 0.06 && confirmAligned! >= 0.06) stance = '反转侧主动成交占优';
-        else if (testAligned! <= -0.12 && (confirmAligned! >= 0.04 || (sweepDepth >= 0.05 && closedInside))) stance = '推进侧成交未能站稳';
-        else if (testAligned! <= -0.06 && confirmAligned! <= -0.06) stance = '推进侧主动成交占优';
-        else if (Math.abs(testAligned!) >= 0.02 && Math.abs(confirmAligned!) >= 0.02 && Math.sign(testAligned!) !== Math.sign(confirmAligned!)) stance = '测试与确认方向分歧';
-      } else {
-        stance = testObs ? '仅测试K有真实覆盖' : '仅确认K有真实覆盖';
-      }
-      const leg1 = legFlow(ctx, flow, pattern.firstLegStart, first, barMs);
-      const leg2 = legFlow(ctx, flow, pattern.secondLegStart, second, barMs);
-      const push1 = leg1.ratio == null ? null : leg1.ratio * (top ? 1 : -1);
-      const push2 = leg2.ratio == null ? null : leg2.ratio * (top ? 1 : -1);
-      const legDetail = push1 != null && push2 != null
-        ? `推进腿真实成交：第一腿推进侧占比 ${pct(push1)}（${leg1.covered}/${leg1.bars}根）→ 第二腿 ${pct(push2)}（${leg2.covered}/${leg2.bars}根）；第二腿${push2 <= push1 - 0.02 ? '弱于' : push2 >= push1 + 0.02 ? '强于' : '接近'}第一腿，相差 ${(Math.abs(push2 - push1) * 100).toFixed(1)} 个百分点。`
-        : `推进腿比较：覆盖不足（第一腿 ${leg1.covered}/${leg1.bars}根、第二腿 ${leg2.covered}/${leg2.bars}根），不拼接近似成交。`;
-      const obsLine = (label: string, obs: TakerObservation | null) => obs
-        ? `${label}：主动买 ${money(obs.buy)} / 主动卖 ${money(obs.sell)} USDT；买占 ${Math.round((1 + obs.ratio) * 50)}% / 卖占 ${Math.round((1 - obs.ratio) * 50)}%；${obs.src === 'rubik' ? 'OKX 官方统计' : '逐笔聚合'}，覆盖 ${(obs.coverage * 100).toFixed(0)}% · 量比 ${obs.volRatio.toFixed(2)}×`
-        : `${label}：买卖额未完整覆盖，不判断主动方向`;
-      const flowDetail = second === idx
-        ? [obsLine('测试/确认K（同一根）', testObs ?? confirmObs)]
-        : [obsLine('测试K', testObs), obsLine('确认K', confirmObs)];
-      const detail = [
-        `关键位 ${priceText(level)} · 第二次测试 ${priceText(pattern.secondPrice)} · ${sweepDepth >= 0.05 ? `刺穿 ${sweepDepth.toFixed(2)} ATR` : sweepDepth > 0 ? `轻微越位 ${sweepDepth.toFixed(2)} ATR` : '未刺穿关键位'} · 确认收盘 ${priceText(c.c)}（${closedInside ? '已回到关键位内侧' : '未回到关键位内侧'}）`,
-        ...flowDetail,
-        legDetail,
-        '这是 OKX taker 成交观察，不是订单簿 OFI，也不证明止损单、仓位或被动挂单。',
-      ];
-      // 这条标记的价值是「关键位当时谁在出力」，数字已经由成交力度标记展示，
-      // 这里避免再重复一个 Δ 标签。
-      const text = stance === '反转侧主动成交占优'
-        ? (top ? '卖方占优' : '买方占优')
-        : stance === '推进侧成交未能站稳'
-          ? (top ? '冲不上去' : '跌不下去')
-          : '';
-      const flowTitle = `${top ? '前高' : '前低'}二次测试成交 · ${stance}`;
-      items.push({
-        id: `keyflow:${key}`, type: 'keyLevelFlow', ts: c.ts, fromTs, price: level,
-        title: flowTitle, detail, source: 'real', confirmed: true,
-        paint: false, tone: stance === '反转侧主动成交占优' || stance === '推进侧成交未能站稳' ? tone : 'neck',
-        event: {
-          id: `keyflow:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone: stance === '反转侧主动成交占优' || stance === '推进侧成交未能站稳' ? tone : 'neck',
-          text: text,
-          marker: 'diamond', priority: 76,
-          title: flowTitle, detail,
-        },
-        levels: [{ id: `keyflow:${key}:level`, name: top ? '双顶关键位' : '双底关键位', fromTs, toTs: c.ts, price: level, tone: 'neck', style: 'dotted', rank: 'normal', priority: 54, label: false }],
-      });
-    }
-
-    // ── 聪明钱结构（SMC/ICT 中可验证、可编码的部分）──
-    // 只汇总价格结构事实；成交佐证要求该窗口 ≥95% 的真实逐笔覆盖。
-    const smcWindow = windowFlow(ctx, Math.max(0, second - 6), idx);
-    const smc = readSmartMoney(
-      ctx,
-      { side: top ? 'top' : 'bottom', idx, first, second, level, neck },
-      smcWindow,
-      smcWindow.known >= 0.95,
-    );
-    const ob = smc.orderBlock;
-    const alignedFvg = smc.fvgs.find(z => z.aligned && !z.filled) ?? null;
-    const swept = !!smc.liquidity?.swept && !!smc.liquidity.reclaimed;
-    const structureShift = !!smc.structure && smc.structure.dir === smc.dir && smc.structure.kind === 'CHOCH';
-    const meaningful = swept || structureShift || !!alignedFvg || (!!ob && !ob.mitigated);
-    if (smc.hits >= 2 && meaningful) {
-      const zone = ob && !ob.mitigated
-        ? { id: `smc:${key}:ob`, fromTs: priceAt(cs, ob.from).ts, toTs: c.ts, lo: ob.lo, hi: ob.hi, text: top ? '供应区' : '需求区' }
-        : alignedFvg
-          ? { id: `smc:${key}:fvg`, fromTs: priceAt(cs, alignedFvg.from).ts, toTs: c.ts, lo: alignedFvg.lo, hi: alignedFvg.hi, text: top ? '空头缺口' : '多头缺口' }
-          : null;
-      const f2 = (v: number) => priceText(v);
-      const short: Record<string, string> = {
-        liquiditySweep: smc.liquidity ? `扫流动性 ${f2(smc.liquidity.price)}（${smc.liquidity.touches} 次触及）` : '扫流动性',
-        structureShift: smc.structure ? `${smc.structure.kind} ${smc.structure.dir > 0 ? '向上' : '向下'} ${f2(smc.structure.price)}` : '结构转向',
-        fvg: alignedFvg ? `缺口 ${f2(alignedFvg.lo)}–${f2(alignedFvg.hi)}` : '同向缺口',
-        orderBlock: ob ? `${top ? '供应' : '需求'}区 ${f2(ob.lo)}–${f2(ob.hi)}` : '订单块',
-        premiumDiscount: `${smc.range.premium ? '溢价' : '折价'} ${(smc.range.position * 100).toFixed(0)}%`,
-        takerConfirm: smc.taker ? `taker Δ ${pct(smc.taker.window.ratio)}` : 'taker',
-      };
-      const lines = smc.evidence.filter(e => e.state === 'hit').map(e => `✓ ${short[e.key]}`);
-      const smcTitle = `${top ? '顶' : '底'} SMC ${smc.hits}/5 · 结构计数，非胜率`;
-      const strong = swept || (!!ob && !ob.mitigated);
-      items.push({
-        id: `smc:${key}`,
-        type: 'smartMoney',
-        ts: c.ts, fromTs, price: level,
-        title: smcTitle,
-        detail: lines,
-        source: smc.source, confirmed: true, tone: strong ? tone : 'neck',
-        event: {
-          id: `smc:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone: strong ? tone : 'neck',
-          text: `SMC ${smc.hits}/5`, marker: 'diamond', priority: 74,
-          title: smcTitle, detail: lines,
-        },
-        ...(zone
-          ? {
-              zone: {
-                id: zone.id, fromTs: zone.fromTs, toTs: zone.toTs, lo: zone.lo, hi: zone.hi,
-                tone: 'zone' as AnnTone, text: zone.text, priority: 66,
-                title: `${top ? '顶部' : '底部'}关键位结构区`, detail: lines.slice(0, 3),
-              },
-            }
-          : {}),
-      });
-    }
-
-    // A price sweep alone cannot establish actual stops or trapped traders.
-    const a = ctx.atr[idx];
-    const test = priceAt(cs, second);
-    const depthAtr = (top ? test.h - level : level - test.l) / Math.max(a, 1e-9);
-    if (depthAtr >= 0.05 && (top ? c.c < level : c.c > level)) {
-      const testRatio = takerRatio(ctx, flow, second);
-      const confirmRatio = takerRatio(ctx, flow, idx);
-      const dir = top ? -1 : 1;
-      const confirmAligned = confirmRatio !== null && confirmRatio * dir >= -0.02;
-      const volRatio = ctx.volMa[second] > 0 ? test.v / ctx.volMa[second] : 0;
-      // Two observational cases: reversal-side takers take over, or aggressive
-      // breakout-side trades are heavy but fail to hold outside the level.
-      const reversal = testRatio !== null && testRatio * dir >= 0.06 && confirmAligned;
-      const stalledChase = testRatio !== null && testRatio * dir <= -0.12 && volRatio >= 1.3 &&
-        (second === idx || confirmRatio !== null && confirmRatio * dir >= 0.04);
-      const real = testRatio !== null && confirmRatio !== null && (reversal || stalledChase);
-      // Always retain price-only candidates; the display preference is applied
-      // by projectSignals, so toggling it need not rescan historical candles.
-      if (real || testRatio === null || confirmRatio === null) {
-        const trap: SignalType = top ? 'bullTrap' : 'bearTrap';
-        const title = real ? (top ? '诱多候选 · 扫高收回' : '诱空候选 · 扫低收回')
-          : (top ? '扫高收回 · 仅价格' : '扫低收回 · 仅价格');
-        const source: SignalSource = real ? 'real' : 'approx';
-        const evidence = real ? [
-          `测试K真实主动差 ${pct(testRatio!)} · 确认K ${pct(confirmRatio!)}`,
-          reversal ? '扫位时反转侧主动成交占优。' : '突破侧成交放量但收盘回到关键位内（可能有承接，不能直接观测被动挂单）。',
-        ] : ['仅能确认价格刺穿并收回；无完整逐笔成交覆盖，不能判断真实主动交易方向。'];
-        const reason = [
-          `刺穿关键位 ${depthAtr.toFixed(2)} ATR 后收回`, ...evidence,
-          '无法观察具体止损单、仓位或谁被套；不代表真实成交结论或胜率。',
-        ];
-        items.push({
-          id: `${trap}:${key}`, type: trap, ts: c.ts, fromTs, price: level, title, detail: reason,
-          source, confirmed: true, tone,
-          // 诱多/诱空结论由关键位判读统一给出；这里保留明细但不上图，避免重复标记。
-          paint: false,
-          event: { id: `${trap}:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone,
-            text: real ? (top ? '诱多候选' : '诱空候选') : (top ? '扫高收回' : '扫低收回'),
-            marker: 'diamond', priority: 88, title, detail: reason },
-        });
-      }
-    }
-
-    const cvdRatio = realCvdBetween(ctx, flow, first, second, barMs);
-    // Retest of the price extreme + a genuine taker CVD that did NOT confirm it.
-    if (cvdRatio !== null && (top ? -cvdRatio : cvdRatio) >= 0.04) {
-      const title = top ? '真实成交 CVD 顶背离' : '真实成交 CVD 底背离';
-      const cvdDetail = [
-        '从一顶/底到二次测试的每根 K 线均有完整的真实 taker 买卖成交。',
-        `两次测试间累计净主动成交 / 总成交额 ${pct(cvdRatio)}`,
-        '价格回到前高/前低，累计主动成交没有同步创极值；仅为背离观察，不等于预测胜率。',
-      ];
-      items.push({ id: `cvd:${key}`, type: 'cvdDivergence', ts: c.ts, fromTs, price: level, title, detail: cvdDetail,
-        source: 'real', confirmed: true, tone: 'neck',
-        event: { id: `cvd:${key}`, ts: c.ts, side: top ? 'above' : 'below', tone: 'neck', text: 'CVD 背离', marker: 'diamond', priority: 72, title, detail: cvdDetail },
-      });
-    }
-  }
-
-  // 双顶/双底关键位判读：每个关键价位只给一条结论
-  // （诱多/诱空、会不会回调、买/卖/观望），取代原来每个形态一块的泛化区带。
-  const calls = buildKeyLevelCalls({
-    patterns: patterns.filter(p => p.idx >= Math.max(0, ctx.n - 289)),
-    ctx, flow, barMs, livePrice: forming?.c,
-  });
-  items.push(...keyLevelCallItems(calls));
-  // 已被关键位判读覆盖的形态，不再重复画一次“双顶/双底”标记（侧栏明细保留）。
-  // 双顶/双底的结构标记只进侧栏：图上每个关键位只留“关键位判读”一条标签，
-  // 否则 300 根里十几个形态会把画面糊满，看不出诱多/诱空与回调结论。
-  for (const it of items) {
-    if (it.type === 'doubleTop' || it.type === 'doubleBottom') it.paint = false;
-  }
+  // One source of truth: one composite record per overlapping M/W structure.
+  // Keep old formations if a newer neckline/level event still falls in the requested range.
+  const stories = buildMwStories({ patterns, ctx, flow, barMs, livePrice: preferences.preview ? forming?.c : undefined });
+  items.push(...stories.filter(i => i.ts >= cutoff || (i.story?.origin.confirmedAt ?? 0) > cutoff));
 
   // Structural levels are independent of trade costs and order-flow availability.
   const current = cs.at(-1)!.c;
@@ -396,6 +82,50 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     items.push({ id, type: 'keyLevels', ts: lv.ts, fromTs: lv.ts, price: lv.price, title, detail, source: 'price', confirmed: true, tone,
       levels: [{ id, fromTs: lv.ts, toTs: null, price: lv.price, tone, style: 'dashed', name: top ? '阻力' : '支撑', priority: 45, rank: 'normal', label: true, detail }],
     });
+
+    // 关键位成交反应不只挂在 M/W 二次测试上：普通支撑/阻力最近一次被触碰的那根，
+    // 若具备完整真实逐笔覆盖，同样给出**单根**成交观察。无覆盖不产出（不伪造方向）。
+    const tol = annotationTolerance(lv.price, ctx.atr.at(-1) ?? 0);
+    let touchIdx = -1;
+    if (tol > 0) {
+      for (let q = ctx.n - 1; q > lv.idx; q--) {
+        const c = ctx.cs[q];
+        if (top ? c.h >= lv.price - tol : c.l <= lv.price + tol) { touchIdx = q; break; }
+      }
+    }
+    const touchObs = touchIdx >= 0 ? takerObservation(ctx, flow, touchIdx) : null;
+    if (touchObs) {
+      const tc = ctx.cs[touchIdx];
+      const ratio = touchObs.ratio;                 // (B−S)/(B+S)，>0 = 主动买占优
+      const range = Math.max(tc.h - tc.l, 1e-12);
+      const closePos = (tc.c - tc.l) / range;
+      const held = top ? tc.c < lv.price : tc.c > lv.price;   // 收盘仍在位的防守一侧
+      const stalled = top ? ratio >= 0.12 && closePos <= 0.45 : ratio <= -0.12 && closePos >= 0.55;
+      const text = (stalled && held)
+        ? (top ? '冲不上去' : '跌不下去')
+        : held && (top ? ratio <= -0.06 : ratio >= 0.06)
+          ? (top ? '卖方占优' : '买方占优')
+          : !held && (top ? ratio >= 0.06 : ratio <= -0.06)
+            ? (top ? '买方占优' : '卖方占优')
+            : '';
+      if (text) {
+        const side = top ? '阻力' : '支撑';
+        const flowTitle = `${side} ${priceText(lv.price)} 最近触碰成交 · ${text}`;
+        const touchDetail = [
+          `最近一次触碰 ${priceText(lv.price)}：${hhmmOf(tc.ts)} 那根，收盘 ${priceText(tc.c)}（${held ? `仍在${side}内侧` : `已收在${side}外侧`}）`,
+          `该根主动买 ${money(touchObs.buy)} / 主动卖 ${money(touchObs.sell)} USDT；买占 ${Math.round((1 + ratio) * 50)}% / 卖占 ${Math.round((1 - ratio) * 50)}%；${touchObs.src === 'rubik' ? 'OKX 官方统计' : '逐笔聚合'}，覆盖 ${(touchObs.coverage * 100).toFixed(0)}% · 量比 ${touchObs.volRatio.toFixed(2)}×`,
+          stalled ? '主动成交很猛但收盘没跟上：力气没换成价格（单根观察）。' : '只反映这一根的主动成交方向与收盘位置。',
+          '这是单根 taker 成交观察，不是订单簿 OFI，也不证明止损单、仓位或被动挂单；关键位本身仍是价格结构。',
+        ];
+        const owner = items.find(i => i.id === id)!;
+        owner.detail = [...owner.detail, ...touchDetail];
+        owner.levels![0].detail = owner.detail;
+        owner.event = { id: `${id}:flow`, ts: tc.ts, side: top ? 'above' : 'below',
+          tone: text === '买方占优' || text === '跌不下去' ? 'long' : 'short',
+          text, marker: 'diamond', priority: 50, title: flowTitle, detail: touchDetail };
+
+      }
+    }
   }
 
   // Trade-imbalance impulses require actual taker data. If the user opts into
@@ -489,8 +219,8 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
       if (read.pullback.failed) break;
       if (!read.pullback.held) continue;
       const up = read.dir > 0;
-      const firstFlow = takerRatio(ctx, flow, b);
-      const holdFlow = takerRatio(ctx, flow, q);
+      const firstFlow = takerObservation(ctx, flow, b)?.ratio ?? null;
+      const holdFlow = takerObservation(ctx, flow, q)?.ratio ?? null;
       const corroborated = firstFlow !== null && holdFlow !== null && firstFlow * read.dir >= 0.08 && holdFlow * read.dir >= -0.12;
       const source: SignalSource = corroborated ? 'real' : 'price';
       const id = `retest:${lv.ts}:${cs[b].ts}`;
@@ -510,35 +240,63 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   }
 
   const covered = [...ctx.real].slice(-preferences.lookback).reduce((sum, n) => sum + n, 0);
-  return { items: [...new Map(items.map(i => [i.id, i])).values()].sort((a, b) => b.ts - a.ts), covered, bars: inScope.length, lastPrice };
+  return {
+    items: [...new Map(items.map(i => [i.id, i])).values()].sort((a, b) => b.ts - a.ts),
+    covered,
+    bars: inScope.length,
+    requested: preferences.lookback,
+    // 加密货币连续交易：历史缺口会让分析只覆盖最新连续段。范围变小必须对用户可见，
+    // 否则「识别数 0」看起来像检测器坏了，其实是没有那么多连续历史。
+    gapTruncated: contiguousStart > 0 && inScope.length < preferences.lookback,
+    lastPrice,
+  };
 }
 
-/** Display-only controls never mutate user drawings or the underlying scanner. */
-export function projectSignals(analysis: SignalAnalysis, preferences: SignalPreferences): { payload: AnnPayload; visible: SignalItem[]; counts: ReturnType<typeof emptyCounts> } {
+/** Selection is presentation-only: calculations and user drawings remain untouched. */
+export function projectSignals(analysis: SignalAnalysis, preferences: SignalPreferences, focusId: string | null = null): { payload: AnnPayload; visible: SignalItem[]; counts: ReturnType<typeof emptyCounts> } {
   const eligible = analysis.items.filter(i => (i.source === 'price' || i.source === 'real' || preferences.allowApprox) && (i.confirmed || preferences.preview));
   const counts = emptyCounts();
-  for (const item of eligible) counts[item.type]++;
-  const visible = preferences.enabled ? eligible.filter(i => preferences.selected[i.type]).slice(0, 160) : [];
+  for (const i of eligible) {
+    counts[i.type]++;
+    if (i.story?.active && i.zone) counts.keyLevelScenario++;
+    if (i.story?.smc && i.story.smc.hits >= 2) counts.smartMoney++;
+  }
+  const visible = preferences.enabled ? eligible.filter(i => preferences.selected[i.type])
+    .sort((a, b) => Number(!!b.story) - Number(!!a.story) || b.ts - a.ts).slice(0, 160) : [];
   const payload = emptySignalPayload();
   payload.decimals = decimalsFor(analysis.lastPrice);
-  // 同一根 K 线同一句文案只画一次（例如阶段标签与成交力度都写“跌不下去”）；
-  // 保留优先级更高的那条，不合并不同含义的标记。
+  const selected = visible.find(i => i.story && i.id === focusId);
+  const rankedStories = selectMwStories(visible.filter(i => i.story));
+  // A historical record may be inspected without declaring it active or extending it into the future.
+  const paintedStories = selected ? [selected, ...rankedStories.filter(i => i.id !== selected.id &&
+    Math.abs(i.price - selected.price) > Math.max(i.story!.referenceAtr, selected.story!.referenceAtr))].slice(0, 3) : rankedStories;
+  const storyIds = new Set(paintedStories.map(i => i.id));
+  const directions = new Set<string>();
   const byText = new Map<string, NonNullable<SignalItem['event']>>();
   for (const item of visible) {
+    if (item.paint === false || (item.story && !storyIds.has(item.id))) continue;
+    // Context must not repaint a line already owned by an M/W record.
+    if (item.type === 'keyLevels' && paintedStories.some(i =>
+      Math.min(Math.abs(i.story!.level - item.price), Math.abs(i.story!.neck - item.price)) <= annotationTolerance(item.price, i.story!.referenceAtr))) continue;
     const approximate = item.source === 'mixed' || item.source === 'approx';
-    // paint === false 的高频事件只进侧栏列表，不画到图上，避免标签糊成一片。
-    if (item.event && item.paint !== false) {
+    if (item.event) {
       const event = { ...item.event, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.event.text}` : '' };
-      if (!event.text) {
-        payload.events.push(event);
-        continue;
-      }
-      const key = `${event.ts}|${event.text}`;
+      const key = `${event.ts}|${event.text || event.id}`;
       const prev = byText.get(key);
       if (!prev || event.priority > prev.priority) byText.set(key, event);
     }
-    if (item.levels && (item.type === 'keyLevels' || preferences.geometry)) payload.levels.push(...item.levels.map(l => ({ ...l, label: l.label && preferences.labels })));
-    if (item.zone) payload.zones.push({ ...item.zone, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.zone.text}` : '' });
+    if (item.levels) {
+      const levels = item.story ? item.levels.filter(l => preferences.geometry || l.id.endsWith(':level'))
+        : item.type === 'keyLevels' || preferences.geometry ? item.levels : [];
+      payload.levels.push(...levels.map(l => ({ ...l, ...(item.id === focusId ? { rank: 'focus' as const, priority: 100 } : {}), label: l.label && preferences.labels })));
+    }
+    if (item.zone && (!item.story || preferences.selected.keyLevelScenario)) {
+      const direction = item.story?.bias ?? item.story?.side ?? item.id;
+      if (!item.story || (!directions.has(direction) && directions.size < 2)) {
+        payload.zones.push({ ...item.zone, text: preferences.labels ? `${approximate ? '≈ ' : ''}${item.zone.text}` : '' });
+        if (item.story) directions.add(direction);
+      }
+    }
     if (item.path && preferences.geometry) payload.paths!.push({ id: `${item.id}:path`, ...item.path });
   }
   payload.events.push(...byText.values());

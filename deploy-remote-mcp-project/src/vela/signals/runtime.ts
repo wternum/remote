@@ -5,10 +5,11 @@ import { ANNOT_OVER, ANNOT_UNDER } from '../annotLayer';
 import type { AnnPayload, AnnObstacle } from '../annotTypes';
 import { barsHub, tfMs } from '../okxProvider';
 import { analyzeSignals, projectSignals, type SignalAnalysis } from './analyze';
-import { EMPTY_RUNTIME, SIGNAL_TYPES, emptyCounts, emptySignalPayload, type SignalStore } from './store';
+import { signalRecomputeKey, flowRecomputeKey } from './recompute';
+import { EMPTY_RUNTIME, flowRequested, emptyCounts, emptySignalPayload, type SignalStore } from './store';
 
 type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: AnnPayload) => void } };
-const blankAnalysis = (): SignalAnalysis => ({ items: [], covered: 0, bars: 0, lastPrice: 0 });
+const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, lastPrice: 0 });
 
 /** The runtime belongs to the workspace, never the panel. Closing the sidebar leaves it alive. */
 export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () => void {
@@ -17,13 +18,14 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
   let chartOff: (() => void)[] = [];
   let symbol = '', timeframe = '', marketKey = '';
   let analysis = blankAnalysis();
-  let fingerprint = '', candleKey = '';
+  let fingerprint = '', candleKey = '', flowInputKey = '';
   let revision = 0, timer: ReturnType<typeof setTimeout> | undefined;
   let needsScan = true, lastScanAt = 0, lastRunAt = 0;
   let flowController: AbortController | null = null;
   let flowMarket = '', flowBusy = false, flowEpoch = 0;
   let lastFlowRequest = 0;
   let preferences = store.getSnapshot().preferences;
+  let focusId = store.getSnapshot().focusId;
   let loading = true;
   let loadError = '';
   let lastInputAt = 0;
@@ -57,7 +59,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     } catch { return []; }
   };
   const paint = () => {
-    const projected = projectSignals(analysis, preferences);
+    const projected = projectSignals(analysis, preferences, focusId);
     if (preferences.enabled) projected.payload.obstacles = obstacles();
     write(projected.payload);
     const period = flowPeriodOf(timeframe);
@@ -66,7 +68,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
       symbol, timeframe,
       status: !preferences.enabled ? 'paused' : loadError ? 'error' : loading ? 'loading' : 'ready',
       message: loadError,
-      bars: analysis.bars, covered: analysis.covered,
+      bars: analysis.bars, requested: analysis.requested, gapTruncated: analysis.gapTruncated, covered: analysis.covered,
       flowSupported: !!period, flowConnected: !!snap?.tape.connected,
       flowSyncing: flowBusy, updatedAt: lastScanAt,
       counts: projected.counts, visible: projected.visible, total: projected.visible.length,
@@ -81,7 +83,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     flowBusy = false;
     if (old) releaseTape(old);
   };
-  const wantsFlow = () => preferences.enabled && SIGNAL_TYPES.some(t => t.group === 'flow' && preferences.selected[t.id]) && !!flowPeriodOf(timeframe);
+  const wantsFlow = () => flowRequested(preferences) && !!flowPeriodOf(timeframe);
   const requestFlow = () => {
     if (!wantsFlow()) { if (flowMarket) stopFlow(); return; }
     const period = flowPeriodOf(timeframe)!;
@@ -115,8 +117,9 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     if (key === marketKey) return;
     stopFlow();
     symbol = ticker; timeframe = nextTf; marketKey = key;
-    loading = true; loadError = ''; candleKey = ''; fingerprint = ''; lastScanAt = 0;
-    analysis = blankAnalysis(); needsScan = true;
+    loading = true; loadError = ''; candleKey = ''; flowInputKey = ''; fingerprint = ''; lastScanAt = 0;
+    analysis = blankAnalysis(preferences.lookback); needsScan = true;
+    focusId = null; store.focus(null);
     write(emptySignalPayload(), true);
     paint(); schedule();
   };
@@ -128,7 +131,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     fingerprint = '';
     chartOff.push(chart.on('load:start', m => {
       setMarket(m.symbol, m.timeframe);
-      loading = true; analysis = blankAnalysis(); candleKey = ''; needsScan = true;
+      loading = true; analysis = blankAnalysis(preferences.lookback); candleKey = ''; needsScan = true;
       write(emptySignalPayload(), true); paint();
     }));
     chartOff.push(chart.on('load:end', m => {
@@ -153,10 +156,17 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     }
     loading = false; loadError = '';
     const last = raw.at(-1)!;
-    const previous = raw.at(-2);
     const barMs = tfMs(timeframe);
-    const key = [marketKey, raw.length, raw[0].time, last.time, previous?.close, previous?.volume,
-      Math.floor(Date.now() / barMs), preferences.preview ? `${last.high}|${last.low}|${last.close}|${last.volume}` : last.close].join('|');
+    const previous = last.time + barMs <= Date.now() ? last : raw.at(-2);
+    // 键只由「已收盘状态」驱动：未勾选预览时，形成中那根的价格跳动不触发重算
+    // （实测单次全量分析约 18ms/1000 根，按 tick 触发等于白烧 CPU，输出还完全一样）。
+    const key = signalRecomputeKey({
+      marketKey, length: raw.length, firstTs: raw[0].time, lastTs: last.time,
+      prevClose: previous?.close, prevVolume: previous?.volume,
+      closedOpen: previous?.open, closedHigh: previous?.high, closedLow: previous?.low,
+      barMs, now: Date.now(), preview: preferences.preview,
+      forming: { high: last.high, low: last.low, close: last.close, volume: last.volume ?? 0 },
+    });
     if (key !== candleKey || needsScan) {
       candleKey = key; needsScan = false;
       const candles: Candle[] = raw.map(b => ({ ts: b.time, o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume ?? 0 }));
@@ -188,19 +198,23 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
   }
 
   const offPreferences = store.subscribe(() => {
-    const next = store.getSnapshot().preferences;
+    const snapshot = store.getSnapshot();
+    const next = snapshot.preferences;
+    if (snapshot.focusId !== focusId) { focusId = snapshot.focusId; paint(); }
     if (next === preferences) return;
     const reanalyze = next.lookback !== preferences.lookback || next.preview !== preferences.preview;
     preferences = next;
     if (!preferences.enabled) stopFlow();
-    if (reanalyze) { needsScan = true; analysis = blankAnalysis(); }
+    if (reanalyze) { needsScan = true; flowInputKey = ''; analysis = blankAnalysis(preferences.lookback); }
     paint(); // All display toggles affect existing marks synchronously, without waiting for a tick.
     schedule(true);
   });
   const offBars = barsHub.subscribe(key => { if (key === marketKey) { lastInputAt = Date.now(); schedule(); } });
   const offFlow = subscribeFlow(snap => {
     if (!alive || !preferences.enabled || snap.instId !== symbol || snap.period !== flowPeriodOf(timeframe)) return;
-    needsScan = true; schedule();
+    const nextFlowKey = flowRecomputeKey(snap, Date.now(), preferences.preview, preferences.lookback);
+    if (nextFlowKey !== flowInputKey) { flowInputKey = nextFlowKey; needsScan = true; }
+    schedule(); // Connection/coverage status can still refresh without re-running the detector.
   });
   // Also notices delayed chart construction and updated user-drawing obstacles.
   const heartbeat = setInterval(() => schedule(), 1500);

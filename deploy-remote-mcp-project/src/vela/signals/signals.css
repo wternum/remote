@@ -159,3 +159,51 @@
 @media (prefers-reduced-motion: reduce) {
   .sa-panel *, .sa-panel *::before, .sa-panel *::after { transition: none !important; }
 }
+
+/* M/W unified records: dense evidence, native Vela colours, no second sidebar. */
+.sa-tabs > button { flex: 1; min-width: 0; justify-content: center; white-space: nowrap; font-size: 11px; padding-inline: 5px; }
+.sa-story-record { border-bottom: 1px solid var(--vela-border-subtle, #242932); }
+.sa-story-record .sa-record { display: flex; align-items: flex-start; gap: 8px; text-align: left; }
+.sa-story-record .sa-record-copy { flex: 1; min-width: 0; }
+.sa-story-record .sa-record-copy strong { white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.sa-story-record .sa-record-copy > span { white-space: normal; line-height: 1.5; font-size: 10px; }
+.sa-story-record .sa-locate-icon { flex: 0 0 auto; margin-top: 3px; }
+.sa-story-record[data-tone="long"] > .sa-record strong { color: var(--vela-up, #2ebd85); }
+.sa-story-record[data-tone="short"] > .sa-record strong { color: var(--vela-down, #f6465d); }
+.sa-story-record[data-tone="warn"] > .sa-record strong { color: #d4b778; }
+.sa-story-detail { padding: 0 12px 12px; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.sa-story-key-prices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 9px 0; border-top: 1px solid var(--vela-border-subtle, #242932); }
+.sa-story-key-prices div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.sa-story-key-prices span { color: var(--vela-fg-muted, #999); font-size: 10px; }
+.sa-story-key-prices strong { font-size: 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-weight: 500; }
+.sa-story-evidence-bar { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; font-size: 10px; color: var(--vela-fg-muted, #999); }
+.sa-story-origin { color: var(--vela-fg-faint, #888); font-size: 10px; margin: 7px 0 10px; }
+.sa-story-preview { padding: 8px; color: #d4b778; background: var(--vela-surface-sunken, #11151b); border-left: 2px solid #d4b778; border-radius: 3px; }
+.sa-story-section { border-top: 1px solid var(--vela-border-subtle, #242932); }
+.sa-story-section > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 10px 0; color: var(--vela-fg, #ddd); font-weight: 500; list-style: none; }
+.sa-story-section > summary::-webkit-details-marker { display: none; }
+.sa-story-number { color: var(--vela-fg-faint, #777); font-size: 9px; font-family: ui-monospace, monospace; }
+.sa-story-chevron { margin-left: auto; color: var(--vela-fg-faint, #777); transition: transform 100ms; }
+.sa-story-section[open] .sa-story-chevron { transform: rotate(180deg); }
+.sa-story-section ul, .sa-context-detail { padding: 0 0 9px; margin: 0; list-style: none; color: var(--vela-fg-muted, #b2b6bf); }
+.sa-story-section li { margin-bottom: 7px; padding-left: 8px; border-left: 1px solid var(--vela-border-subtle, #30343a); }
+.sa-story-section li:last-child { margin-bottom: 0; }
+.sa-story-timeline { border-top: 1px solid var(--vela-border-subtle, #242932); }
+.sa-story-timeline summary { padding: 10px 0; cursor: pointer; }
+.sa-story-timeline summary span { float: right; color: var(--vela-fg-faint, #777); }
+.sa-story-timeline p { font-size: 10px; color: var(--vela-fg-faint, #777); margin: 0 0 8px; }
+.sa-story-timeline ol { list-style: none; margin: 0; padding: 0 0 0 7px; border-left: 1px solid var(--vela-border-subtle, #30343a); }
+.sa-story-timeline button { text-align: left; width: 100%; padding: 4px 0 9px; background: transparent; border: none; color: var(--vela-fg-muted, #aaa); cursor: pointer; }
+.sa-story-timeline time { display: block; font-size: 9px; color: var(--vela-fg-faint, #777); font-variant-numeric: tabular-nums; }
+.sa-story-timeline span { display: block; font-size: 10px; }
+.sa-more { width: 100%; padding: 12px; font-size: 11px; background: transparent; color: var(--vela-fg-muted, #aaa); border: 0; cursor: pointer; }
+.sa-more:hover, .sa-story-timeline button:hover { color: var(--vela-fg, #eee); }
+.sa-context-detail { padding: 8px 12px; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.sa-context-detail li { margin-bottom: 6px; }
+.sa-story-section summary:focus-visible, .sa-story-timeline summary:focus-visible, .sa-story-timeline button:focus-visible, .sa-more:focus-visible { outline: 1px solid var(--vela-accent, #73b4ea); outline-offset: 1px; border-radius: 3px; }
+.sa-data-status > div { gap: 8px; flex-wrap: wrap; }
+@media (max-width: 480px) { .sa-story-detail { padding-inline: 12px; } .sa-story-key-prices strong { font-size: 13px; } }
+
+.sa-mw-filter { display: flex; gap: 5px; padding: 10px 12px 4px; }
+.sa-mw-filter button { border: 1px solid var(--sa-line); background: transparent; color: var(--sa-muted); border-radius: 5px; padding: 4px 7px; font-size: 10px; }
+.sa-mw-filter button[aria-pressed="true"] { color: var(--sa-text); background: var(--sa-active); border-color: var(--sa-border); }

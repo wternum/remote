@@ -1,7 +1,7 @@
 import { initializeDatabase } from '@/db';
+import { fetchStatsProxy } from './statsProxy';
 
 type RouteHandler = (request: Request) => Promise<Response>;
-type ParamHandler = (request: Request, ctx: { params: Promise<Record<string, string | string[]>> }) => Promise<Response>;
 let startup: Promise<void> | undefined;
 
 // Static-preview transport: dispatch to the same active route handlers used
@@ -15,7 +15,7 @@ export function startRuntime(): Promise<void> {
       await initializeDatabase().catch(error => {
         console.warn('Local persistence unavailable:', error);
       });
-      const [data, backtest, signals, health, engine, okx] = await Promise.all([
+      const [data, backtest, signals, health, engine] = await Promise.all([
         // Use the active routes, not the archived MCP snapshot.  Otherwise a
         // fix in src/app/api only affects Next while the static SPA silently
         // keeps executing the old implementation.
@@ -24,7 +24,6 @@ export function startRuntime(): Promise<void> {
         import('@/app/api/signals/route'),
         import('@/app/api/health/route'),
         import('@/api/engine'),
-        import('@/app/api/okx/[...path]/route'),
       ]);
       const routes: Record<string, Record<string, RouteHandler>> = {
         '/api/data': { GET: data.GET },
@@ -34,29 +33,12 @@ export function startRuntime(): Promise<void> {
         // 新增：入场确认引擎的扫描结果（不改远程任何既有 route）
         '/api/engine/scan': { GET: engine.GET },
       };
-      // Catch-all rubik proxy (no CORS upstream). Vite dev has no Next server,
-      // so the static build must dispatch it itself.
-      const okxProxy = okx.GET as unknown as ParamHandler;
       const nativeFetch = window.fetch.bind(window);
       window.fetch = async (input, init) => {
         const request = new Request(input, init);
         const url = new URL(request.url);
         if (url.origin !== window.location.origin) return nativeFetch(input, init);
-        if (url.pathname.startsWith('/api/okx/')) {
-          // Next already serves this route (server-side fetch, no CORS). Only
-          // when there is no backend — static/Vite preview — run it in-browser.
-          // Intercepting unconditionally made the browser call OKX directly and
-          // fail CORS.
-          const native = await nativeFetch(input, init).catch(() => null);
-          if (native && native.ok) return native;
-          const path = url.pathname.slice('/api/okx/'.length).split('/').filter(Boolean).map(decodeURIComponent);
-          try {
-            return await okxProxy(request, { params: Promise.resolve({ path }) });
-          } catch (error) {
-            console.error('API /api/okx:', error);
-            return Response.json({ code: '500', msg: 'proxy failed', data: [] }, { status: 500 });
-          }
-        }
+        if (url.pathname.startsWith('/api/okx/')) return fetchStatsProxy(request, nativeFetch);
         const route = routes[url.pathname];
         if (!route) return nativeFetch(input, init);
         const handler = route[request.method];

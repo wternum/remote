@@ -1,130 +1,65 @@
 import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS, scanDoubles } from '../remote/setup-mcp-project-locally/src/lib/engine';
-import type { Candle } from '../src/lib/types';
-import { analyzeSignals, projectSignals } from '../src/vela/signals/analyze';
-import { scanAnnotationPatterns } from '../src/vela/signals/patterns';
-import { buildContext } from '../src/quant/context';
-import { DEFAULT_PREFERENCES, type SignalPreferences } from '../src/vela/signals/store';
+import type { Candle } from '@/lib/types';
+import { analyzeSignals, projectSignals } from '@/vela/signals/analyze';
+import { scanAnnotationPatterns } from '@/vela/signals/patterns';
+import { buildContext } from '@/quant/context';
+import { DEFAULT_PREFERENCES, SIGNAL_TYPES, normalizePreferences } from '@/vela/signals/store';
 import { annotationCandles, annotationFlow } from './signal-fixtures';
-
-const NOW = 1_800_000_000_000;
-const MS = 300_000;
-const prefs: SignalPreferences = { ...DEFAULT_PREFERENCES, selected: Object.fromEntries(Object.keys(DEFAULT_PREFERENCES.selected).map(k => [k, true])) as SignalPreferences['selected'] };
-const top = annotationCandles(true, 90, NOW);
-const bottom = annotationCandles(false, 90, NOW);
-const topSignal = (cs: Candle[], now = NOW) => analyzeSignals(cs, MS, prefs, null, now).items.find(x => x.type === 'doubleTop');
-
-const causal = topSignal(top)!;
-assert.ok(causal, 'confirmed price-only M structure exists');
-assert.ok(analyzeSignals(bottom, MS, prefs, null, NOW).items.some(i => i.type === 'doubleBottom'), 'mirror W structure exists');
-assert.deepEqual(scanAnnotationPatterns(buildContext(top)).map(p => p.idx), [70]);
-console.log('PASS causal price-only M/W detection at second-test close');
-
-// The old trade scanner rejects if expected round-trip cost is too large vs stop.
-// That restriction belongs to execution/backtests, NOT the visual shape detector.
-const expensive: Candle[] = top.map(c => {
-  const at = (price: number) => 100_000 + (price - 100) * 20;
-  return { ...c, o: at(c.o), h: at(c.h), l: at(c.l), c: at(c.c) };
-});
-const old = scanDoubles(expensive, { ...DEFAULT_PARAMS, entryMode: 'confirm', trendBlock: 50 });
-assert.equal(old.signals.filter(s => s.pattern === 'dt_reject').length, 0, 'legacy scanner should reject expensive-to-trade shape');
-assert.ok(topSignal(expensive), 'price-only scanner should still annotate the real shape');
-console.log('PASS trading economics cannot hide a valid visual pattern');
-
-// No future K line may alter an already-placed marker or its details/path.
-const untilEvent = top.slice(0, 71);
-const eventNow = top[70].ts + MS;
-const before = topSignal(untilEvent, eventNow)!;
-assert.ok(before, 'event should exist at the first confirmed close');
-const future = top.map((c, i) => i > 70 ? { ...c, v: c.v * 1000, h: c.h + 0.005 * (i - 70) } : c);
-const after = topSignal(future, NOW)!;
-assert.deepEqual(after, before, 'future K/volume may not change price-event metadata');
-assert.ok(!topSignal(untilEvent, eventNow - 1), 'unclosed signal candle cannot produce a confirmed M');
-assert.ok(before.path?.points.every(p => p.ts <= before.ts));
-console.log('PASS no hindsight, first close is confirmation time');
-
-const noFlow = analyzeSignals(top, MS, prefs, null, NOW);
-const hidden = projectSignals(noFlow, prefs);
-assert.ok(hidden.visible.every(i => i.source === 'price'), 'default must not claim real taker signals without trades');
-const approximated = projectSignals(noFlow, { ...prefs, allowApprox: true });
-const priceSweep = approximated.visible.find(i => i.type === 'bullTrap');
-assert.ok(priceSweep, 'a price sweep may be optionally shown with explicit provenance');
-assert.equal(priceSweep.source, 'approx');
-assert.ok(priceSweep.title.includes('仅价格') && !priceSweep.title.includes('诱多'));
-// 诱多/诱空明细仍保留在侧栏，但图上由关键位判读统一给出结论，避免同一根 K 线重复标注。
-assert.ok(priceSweep.paint === false, 'trap detail stays in the sidebar, not painted twice');
-assert.ok(!approximated.payload.events.some(e => e.id.startsWith('bullTrap')), 'no duplicate trap marker on the canvas');
-assert.ok(approximated.visible.filter(i => i.type === 'deltaImpulse').every(i => i.title.includes('K 线量价') && !i.title.includes('主动买入') && !i.title.includes('主动卖出')));
-assert.ok(!approximated.visible.some(i => i.type === 'cvdDivergence'), 'OHLC approximation must never be presented as real CVD');
-console.log('PASS missing taker data remains price-only; optional proxy cannot masquerade as real flow');
-
-const fullFlow = annotationFlow(top);
-const localFlow = { ...fullFlow, bars: new Map([[top[70].ts, fullFlow.bars.get(top[70].ts)!]]) };
-const local = projectSignals(analyzeSignals(top, MS, prefs, localFlow, NOW), prefs);
-const trap = local.visible.find(i => i.type === 'bullTrap');
-assert.ok(trap && trap.source === 'real', 'only the event bar has real taker data, but that is sufficient for a local sweep + reclaim');
-assert.ok(trap.title.includes('候选') && trap.detail.some(line => line.includes('无法观察具体止损单')));
-assert.ok(!local.visible.some(i => i.type === 'cvdDivergence'), 'local flow must not be mistaken for continuous CVD');
-const splitFlow = { ...fullFlow, bars: new Map([[top[40].ts, fullFlow.bars.get(top[40].ts)!], [top[70].ts, fullFlow.bars.get(top[70].ts)!]]) };
-assert.ok(!analyzeSignals(top, MS, prefs, splitFlow, NOW).items.some(i => i.type === 'cvdDivergence' && i.source === 'real'), 'CVD rejects gaps between tests');
-const continuous = analyzeSignals(top, MS, prefs, fullFlow, NOW);
-assert.ok(continuous.items.some(i => i.type === 'cvdDivergence' && i.source === 'real'), 'contiguous real taker flow enables CVD');
-const opposite = analyzeSignals(top, MS, prefs, annotationFlow(top, 0.85), NOW);
-assert.ok(!opposite.items.some(i => i.type === 'cvdDivergence'), 'taker flow confirming the price high is not a divergence');
-const mirror = analyzeSignals(bottom, MS, prefs, annotationFlow(bottom, 0.85), NOW);
-assert.ok(mirror.items.some(i => i.type === 'bearTrap' && i.source === 'real'), 'mirrored low sweep is symmetric');
-console.log('PASS local real sweep evidence works, continuous real CVD rejects missing bars and respects direction');
-
-// ── Key-level taker-flow context (K1/K2/K3) ─────────────────────
-const keyOf = (analysis: ReturnType<typeof analyzeSignals> | ReturnType<typeof projectSignals>) =>
-  ('items' in analysis ? analysis.items : analysis.visible).find(i => i.type === 'keyLevelFlow');
-const keyFull = keyOf(continuous);
-assert.ok(keyFull && keyFull.source === 'real', 'second test with real taker coverage gets a key-level flow marker');
-assert.ok(keyFull.title.includes('反转侧主动成交占优'), `fixture sell pressure should be reversal-aligned for a top: ${keyFull.title}`);
-assert.equal(keyFull.event?.text, '卖方占优', 'key-level label states the side in plain words, numbers live in the hover');
-assert.ok(keyFull.detail.some(line => line.includes('测试/确认K（同一根）') && line.includes('覆盖 100%')));
-assert.ok(keyFull.detail.some(line => line.includes('推进腿真实成交')), 'fully covered legs should be compared');
-assert.ok(keyFull.detail.some(line => line.includes('不是订单簿 OFI')));
-assert.ok(!keyOf(noFlow), 'no taker data means no real key-level flow marker');
-assert.ok(!keyOf(approximated), 'OHLC approximation must not create a real key-level flow marker');
-const keyOff = projectSignals(continuous, { ...prefs, selected: { ...prefs.selected, keyLevelFlow: false } });
-assert.ok(!keyOff.visible.some(i => i.type === 'keyLevelFlow') && keyOff.visible.some(i => i.type === 'doubleTop'), 'key-level switch is independent');
-console.log('PASS key-level marker reports real test/confirm flow without becoming a probability');
-
-for (const [scale, expected] of [[0.849, false], [0.851, true]] as const) {
-  const boundary = annotationFlow(top);
-  const bar = boundary.bars.get(top[70].ts)!;
-  bar.buy *= scale;
-  bar.sell *= scale;
-  assert.equal(!!keyOf(analyzeSignals(top, MS, prefs, boundary, NOW)), expected, `aggregate coverage ${(scale * 100).toFixed(1)}% must respect the 85% real-flow boundary`);
-}
-const neutralFlow = annotationFlow(top);
-neutralFlow.bars.set(top[70].ts, { ts: top[70].ts, buy: 900_000, sell: 900_000, src: 'tape', trades: 100 });
-const neutralKey = keyOf(analyzeSignals(top, MS, prefs, { ...neutralFlow, bars: new Map([[top[70].ts, neutralFlow.bars.get(top[70].ts)!]]) }, NOW));
-assert.ok(neutralKey?.title.includes('主动成交接近中性'), `balanced taker flow must stay neutral: ${neutralKey?.title}`);
-const advanceFlow = annotationFlow(top, 0.85);
-const advanceKey = keyOf(analyzeSignals(top, MS, prefs, advanceFlow, NOW));
-assert.ok(advanceKey?.title.includes('推进侧成交未能站稳'), `buy-dominant flow that sweeps and closes back inside is a failed push, not reversal-side evidence: ${advanceKey?.title}`);
-assert.ok(analyzeSignals(top, MS, prefs, advanceFlow, NOW).items.some(i => i.type === 'bullTrap' && i.detail.some(line => line.includes('无法观察具体止损单'))), 'failed-push trap wording must remain a candidate, not a claim about stops');
-console.log('PASS key-level coverage boundary, neutral flow and推进侧 flow are not forced into a reversal call');
-
-const pattern = scanAnnotationPatterns(buildContext(top))[0];
-const weakening = annotationFlow(top);
-for (const [i, candle] of top.entries()) {
-  const bar = weakening.bars.get(candle.ts)!;
-  const ratio = i >= pattern.firstLegStart && i <= pattern.first ? 0.7 : i >= pattern.secondLegStart && i <= pattern.second ? 0.3 : -0.7;
-  bar.buy = candle.v * (1 + ratio) / 2;
-  bar.sell = candle.v * (1 - ratio) / 2;
-}
-const weakKey = keyOf(analyzeSignals(top, MS, prefs, weakening, NOW));
-assert.ok(weakKey?.detail.some(line => line.includes('第二腿弱于第一腿，相差 40.0 个百分点')), `leg comparison should quantify normalized推进减弱: ${weakKey?.detail.join(' / ')}`);
-const localKey = keyOf(local);
-assert.ok(localKey?.detail.some(line => line.includes('推进腿比较：覆盖不足')), 'partial coverage must block leg comparison instead of filling gaps');
-const keyBefore = keyOf(analyzeSignals(untilEvent, MS, prefs, annotationFlow(untilEvent), eventNow));
-const keyAfter = keyOf(analyzeSignals(future, MS, prefs, annotationFlow(future), NOW));
-assert.deepEqual(keyAfter, keyBefore, 'later candles/trades may not rewrite a confirmed key-level observation');
-console.log('PASS complete legs quantify推进减弱; partial legs and future data cannot rewrite the marker');
-
+const NOW=1_800_000_000_000, MS=300_000;
+const prefs=normalizePreferences({...DEFAULT_PREFERENCES,selected:Object.fromEntries(SIGNAL_TYPES.map(t=>[t.id,true]))});
+const top=annotationCandles(true,90,NOW),bottom=annotationCandles(false,90,NOW);
+const topSignal=(cs:Candle[],now=NOW)=>analyzeSignals(cs,MS,prefs,null,now).items.find(x=>x.type==='doubleTop');
+assert.ok(topSignal(top));assert.ok(analyzeSignals(bottom,MS,prefs,null,NOW).items.some(x=>x.type==='doubleBottom'));
+assert.deepEqual(scanAnnotationPatterns(buildContext(top)).map(p=>p.idx),[70]);
+const expensive=top.map(c=>{const at=(p:number)=>100000+(p-100)*20;return {...c,o:at(c.o),h:at(c.h),l:at(c.l),c:at(c.c)};});
+assert.equal(scanDoubles(expensive,{...DEFAULT_PARAMS,entryMode:'confirm',trendBlock:50}).signals.filter(s=>s.pattern==='dt_reject').length,0);
+assert.ok(topSignal(expensive));
+console.log('PASS same causal M/W geometry, unaffected by trade costs');
+const untilEvent=top.slice(0,71),eventNow=top[70].ts+MS;
+const before=topSignal(untilEvent,eventNow)!;
+const future=top.map((c,i)=>i>70?{...c,v:c.v*1000,h:c.h+0.005*(i-70)}:c);
+const after=topSignal(future,NOW)!;
+assert.deepEqual(after.story!.origin,before.story!.origin);
+assert.deepEqual(after.story!.evidence,before.story!.evidence);
+assert.deepEqual(after.path,before.path);
+assert.ok(!topSignal(untilEvent,eventNow-1));
+console.log('PASS origin/evidence/geometry immutable; evolving stage is not confused with a frozen historical event');
+const noFlow=analyzeSignals(top,MS,prefs,null,NOW);
+const storyOf=(r:ReturnType<typeof analyzeSignals>)=>r.items.find(x=>x.type==='doubleTop')!.story!;
+assert.equal(storyOf(noFlow).trap!.source,'price');assert.ok(!storyOf(noFlow).trap!.label.includes('诱多'));
+assert.equal(storyOf(noFlow).evidence.cvdRatio,null);
+const approximated=projectSignals(noFlow,{...prefs,allowApprox:true});
+assert.ok(approximated.visible.filter(i=>i.type==='deltaImpulse').every(i=>i.title.includes('K 线量价')));
+assert.equal(storyOf(noFlow).evidence.test,null);
+const full=annotationFlow(top), localFlow={...full,bars:new Map([[top[70].ts,full.bars.get(top[70].ts)!]])};
+const local=storyOf(analyzeSignals(top,MS,prefs,localFlow,NOW));
+assert.equal(local.trap!.source,'real');assert.ok(local.trap!.label.includes('候选'));assert.equal(local.evidence.cvdRatio,null);
+const split={...full,bars:new Map([top[40],top[70]].map(c=>[c.ts,full.bars.get(c.ts)!]))};
+assert.equal(storyOf(analyzeSignals(top,MS,prefs,split,NOW)).evidence.cvdRatio,null);
+const continuous=analyzeSignals(top,MS,prefs,full,NOW);
+assert.equal(storyOf(continuous).evidence.cvdDivergence,true);
+assert.equal(storyOf(analyzeSignals(top,MS,prefs,annotationFlow(top,.85),NOW)).evidence.cvdDivergence,false);
+const mirror=analyzeSignals(bottom,MS,prefs,annotationFlow(bottom,.85),NOW).items.find(x=>x.story)!.story!;
+assert.equal(mirror.trap!.kind,'bear');assert.equal(mirror.trap!.source,'real');
+console.log('PASS trap observations local; CVD requires continuous real coverage; mirror side is symmetric');
+const keyFull=storyOf(continuous);
+assert.equal(keyFull.evidence.stance,'反转侧主动成交占优');
+assert.ok(keyFull.sections[2].lines.some(x=>x.includes('测试/确认K（同一根）')&&x.includes('覆盖 100.0%')));
+assert.ok(keyFull.sections[2].lines.some(x=>x.includes('不是订单簿 OFI')));
+for(const [scale,expected] of [[.849,false],[.851,true]] as const){const f=annotationFlow(top);const b=f.bars.get(top[70].ts)!;b.buy*=scale;b.sell*=scale;assert.equal(!!storyOf(analyzeSignals(top,MS,prefs,f,NOW)).evidence.test,expected);}
+const neutral=annotationFlow(top);neutral.bars.set(top[70].ts,{ts:top[70].ts,buy:900000,sell:900000,src:'tape',trades:100});
+assert.equal(storyOf(analyzeSignals(top,MS,prefs,neutral,NOW)).evidence.stance,'主动成交接近中性');
+assert.equal(storyOf(analyzeSignals(top,MS,prefs,annotationFlow(top,.85),NOW)).evidence.stance,'推进侧成交未能站稳');
+const pattern=scanAnnotationPatterns(buildContext(top))[0],weakening=annotationFlow(top);
+for(const [i,c] of top.entries()){const r=i>=pattern.firstLegStart&&i<=pattern.first? .7 : i>=pattern.secondLegStart&&i<=pattern.second? .3 : -.7;const b=weakening.bars.get(c.ts)!;b.buy=c.v*(1+r)/2;b.sell=c.v*(1-r)/2;}
+const weak=storyOf(analyzeSignals(top,MS,prefs,weakening,NOW));
+assert.ok(weak.sections[2].lines.some(x=>x.includes('第二腿弱于第一腿，相差 40.0 个百分点')));
+assert.ok(local.sections[2].lines.some(x=>x.includes('推进腿比较：覆盖不足')));
+const keyBefore=analyzeSignals(untilEvent,MS,prefs,annotationFlow(untilEvent),eventNow).items.find(x=>x.story)!.story!;
+const keyAfter=analyzeSignals(future,MS,prefs,annotationFlow(future),NOW).items.find(x=>x.story)!.story!;
+assert.deepEqual(keyBefore.evidence,keyAfter.evidence);
+console.log('PASS coverage boundary, neutral/contrary flow, precise leg weakening and evidence causality');
 // A nearby OHLC proxy must never suppress a later, same-direction real trade event.
 const adjacent = top.map((c, i) => i === 77
   ? { ...c, o: c.c + 0.8, h: c.c + 0.9, l: c.c - 0.1, v: 3_500_000 }
