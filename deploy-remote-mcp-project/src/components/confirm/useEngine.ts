@@ -25,6 +25,9 @@ interface Payload {
   symbols?: string[];
   timeframes?: string[];
   live: boolean;
+  dataReady?: boolean;
+  dataIssue?: string;
+  gapped?: boolean;
   from: number;
   to: number;
   lastTs: number;
@@ -91,8 +94,9 @@ export function readActiveMarket(): { symbol: string; bar: string } {
 }
 
 export function useEngine(open: boolean) {
-  // 默认用三币种合并样本：形态笔数足够，胜率/期望才有统计意义
-  const [market, setMarket] = useState(() => ({ symbol: 'ALL', bar: 'ALL' }));
+  // 默认跟随当前图表市场：合并样本（ALL × 双周期）需要 6 次深拉，冷启动实测
+  // 37s；单市场约 9s 且命中共享行情缓存后 <1s。合并样本仍可在面板里一键选择。
+  const [market, setMarket] = useState(() => readActiveMarket());
   const [payload, setPayload] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +104,8 @@ export function useEngine(open: boolean) {
   // 默认「1R 减半 + 保本」：对照实验中它的胜率与净 R 均优于原颈线目标
   const [exitPlan, setExitPlan] = useState<ExitPlan>('partial');
   const requested = useRef('');
+  const abortRef = useRef<AbortController | null>(null);
+  const seqRef = useRef(0);
 
   useEffect(() => {
     const off = subscribeConfig(next => setCfg(next));
@@ -108,20 +114,34 @@ export function useEngine(open: boolean) {
     };
   }, []);
 
+  // 卸载时中止在途请求，避免 setState on unmounted
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const load = useCallback(
     async (fresh = false) => {
+      const key = `${market.symbol}|${market.bar}`;
+      requested.current = key;
+      // 快速切换市场时旧请求可能更晚返回并覆盖新结果：取消 + 序号双重保护
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const seq = ++seqRef.current;
       setLoading(true);
       setError(null);
       try {
         const q = new URLSearchParams({ symbol: market.symbol, bar: market.bar });
         if (fresh) q.set('fresh', '1');
-        const res = await fetch(`/api/engine/scan?${q}`);
+        const res = await fetch(`/api/engine/scan?${q}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        setPayload((await res.json()) as Payload);
+        const data = (await res.json()) as Payload;
+        if (seq !== seqRef.current) return;
+        setPayload(data);
+        if (data.dataReady === false) setError(data.dataIssue ?? '行情数据不完整，本次未生成扫描统计。');
       } catch (e) {
+        if (controller.signal.aborted || seq !== seqRef.current) return;
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        setLoading(false);
+        if (seq === seqRef.current) setLoading(false);
       }
     },
     [market.bar, market.symbol],

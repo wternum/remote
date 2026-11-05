@@ -101,13 +101,62 @@ const store = new Map<string, OHLCV[]>();
 const listeners = new Set<Listener>();
 const keyOf = (ticker: string, tf: string) => `${ticker}|${tf}`;
 
-function merge(key: string, incoming: OHLCV[]) {
-  const cur = store.get(key) ?? [];
-  if (!incoming.length) return;
+const MAX_STORE_BARS = 12_000;
+
+/**
+ * 同一时间戳的两份 K 线取较新的一份。
+ *
+ * 数据来自两条异步通道：REST 分批历史（快照拍在加载开始那一刻）和 WebSocket
+ * 实时推送。旧实现无条件让后到者覆盖先到者，于是历史加载的每一批都会把
+ * WebSocket 已推送的最新一根改回加载开始时的旧快照——图表上成交量柱
+ * 忽高忽低；如果该根在加载期间收盘，它会永久保留残缺的成交量。
+ *
+ * 一根 K 线内的累计成交额只增不减（实测 OKX 推送 35 次 0 次回退），因此成交额
+ * 更大者必然更新；相等时取后到者，以接收价格修正。
+ */
+function newer(existing: OHLCV | undefined, incoming: OHLCV): OHLCV {
+  if (!existing) return incoming;
+  return (incoming.volume ?? 0) >= (existing.volume ?? 0) ? incoming : existing;
+}
+
+function mergeFull(key: string, cur: OHLCV[], incoming: OHLCV[]) {
   const map = new Map<number, OHLCV>();
   for (const b of cur) map.set(b.time, b);
-  for (const b of incoming) map.set(b.time, b);
-  const next = [...map.values()].sort((a, b) => a.time - b.time).slice(-12_000);
+  for (const b of incoming) map.set(b.time, newer(map.get(b.time), b));
+  const next = [...map.values()].sort((a, b) => a.time - b.time).slice(-MAX_STORE_BARS);
+  store.set(key, next);
+  listeners.forEach(fn => fn(key));
+}
+
+/**
+ * 合并推送 / 回补的 K 线。
+ *
+ * 持久订阅时每秒都会收到形成中那根 K 线的更新，而旧实现每次都把 6000–12000 根
+ * 全量重建 Map 再排序（实测 528µs/次）。绝大多数更新只改最后一根，这里走
+ * 「尾部原地替换」的快路径；只有历史回补造成乱序时才退回全量合并。
+ */
+function merge(key: string, incoming: OHLCV[]) {
+  if (!incoming.length) return;
+  const cur = store.get(key) ?? [];
+  const tail = cur[cur.length - 1];
+  const head = incoming[0];
+  const ordered = !tail || !head || head.time >= tail.time;
+  if (!ordered) {
+    mergeFull(key, cur, incoming);
+    return;
+  }
+  const next = cur.length ? cur.slice() : [];
+  for (const b of incoming) {
+    const last = next[next.length - 1];
+    if (last && b.time === last.time) next[next.length - 1] = newer(last, b);
+    else if (!last || b.time > last.time) next.push(b);
+    else {
+      // 中间插入了更早的一根：退回全量合并
+      mergeFull(key, cur, incoming);
+      return;
+    }
+  }
+  if (next.length > MAX_STORE_BARS) next.splice(0, next.length - MAX_STORE_BARS);
   store.set(key, next);
   listeners.forEach(fn => fn(key));
 }
@@ -188,9 +237,15 @@ export class OKXProvider implements DataProvider {
     const want = this.depthFor(timeframe, range);
     const map = new Map<number, OHLCV>();
     const snapshot = () => [...map.values()].sort((a, b) => a.time - b.time).slice(-want);
+    const marketKey = keyOf(ticker, timeframe);
     const emit = () => {
-      const out = snapshot();
-      merge(keyOf(ticker, timeframe), out);
+      const snap = snapshot();
+      merge(marketKey, snap);
+      // 交给图表的必须是"本次请求的时间范围 × 镜像里的最新值"：
+      // 直接给快照，旧值会绕过 merge 的新旧判断覆盖图表上的实时 K 线；
+      // 直接给镜像尾部，则在向左滚动加载更早区间（range.to）时返回错误时间段。
+      const latest = new Map((store.get(marketKey) ?? []).map(b => [b.time, b]));
+      const out = snap.map(b => latest.get(b.time) ?? b);
       onBatch(out);
       return out;
     };
@@ -236,10 +291,36 @@ export class OKXProvider implements DataProvider {
 
   subscribe(ticker: string, timeframe: string, onBar: (bar: OHLCV) => void): () => void {
     const channel = `candle${toOkxBar(timeframe)}`;
+    const bar = toOkxBar(timeframe);
+    const marketKey = keyOf(ticker, timeframe);
     let ws: WebSocket | null = null;
     let stopped = false;
     let timer: number | null = null;
     let ping: number | null = null;
+    let opened = false;
+
+    /**
+     * 重连补洞：OKX 的 candle 频道只推送订阅之后的变化，断线期间收盘的 K 线不会
+     * 补发。旧实现重连后直接续订阅，barsHub 里就留下一个永久缺口；而信号标注
+     * 只分析「最新缺口之后」的连续段（analyze.ts），缺口后不足 30 根时整块标注
+     * 消失。这里在重连时用 REST 把最近 300 根合并回镜像，缺口即被填平。
+     */
+    const backfill = async () => {
+      try {
+        const page = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '300' });
+        const fresh: OHLCV[] = [];
+        for (const r of page) {
+          const parsed = parseRow(r, ticker);
+          if (parsed) fresh.push(parsed);
+        }
+        if (!fresh.length || stopped) return;
+        merge(marketKey, fresh);
+        const last = fresh[fresh.length - 1];
+        if (last) onBar(last);
+      } catch {
+        // 补洞失败不阻塞重连；下一次重连会再试
+      }
+    };
 
     const open = () => {
       if (stopped) return;
@@ -252,6 +333,8 @@ export class OKXProvider implements DataProvider {
       ws.onopen = () => {
         ws?.send(JSON.stringify({ op: 'subscribe', args: [{ channel, instId: ticker }] }));
         ping = window.setInterval(() => ws?.readyState === 1 && ws.send('ping'), 20_000);
+        if (opened) void backfill();
+        opened = true;
       };
       ws.onmessage = ev => {
         if (ev.data === 'pong') return;

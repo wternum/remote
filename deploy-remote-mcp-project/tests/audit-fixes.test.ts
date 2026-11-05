@@ -6,7 +6,7 @@ import { DEFAULT_PARAMS, scanDoubles } from '@/lib/engine';
 import { simulate } from '@/lib/engine';
 import { runScan, type Candidate } from '@/quant/scan';
 import { summarize } from '@/quant/stats';
-import { synthCandles } from '@/server/okx';
+import { legacyTrendCandles as synthCandles } from './legacy-synth';
 import { bigBiasOf, shouldRepairFlow, type FlowTrade } from '@/quant/flow';
 
 // ── 确定性合成行情 ───────────────────────────────────────────

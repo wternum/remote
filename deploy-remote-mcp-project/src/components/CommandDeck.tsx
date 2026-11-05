@@ -553,6 +553,11 @@ export default function CommandDeck({
               回测核心指标 (1500根K线)
             </div>
 
+            {bt?.dataReady === false && (
+              <div className="col-span-2 rounded border border-[#f0b90b]/30 bg-[#f0b90b]/[0.06] px-2.5 py-2 text-[10px] leading-relaxed text-[#f0b90b]">
+                {bt.dataIssue ?? '行情数据不完整，本次未生成回测统计；请稍后刷新。'}
+              </div>
+            )}
             {bt ? (
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-lg border border-[#1d2534] bg-[#141a27] p-2.5">

@@ -99,6 +99,8 @@ export interface BookLevel {
 
 export interface MarketData {
   live: boolean;
+  /** 服务端历史 K 线存在缺根/未取满时为 true。 */
+  gapped?: boolean;
   symbol: string;
   bar: string;
   candles: Candle[];

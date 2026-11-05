@@ -118,8 +118,15 @@ function withForming(base: Candle[], close: number, now: number) {
   assert.equal(r.gapTruncated, true, '缺口截断分析范围时必须可观测');
   assert.ok(r.bars < gapped.length, '截断后分析根数小于可用根数');
   const whole = analyzeSignals(cs, ms, prefs, null, now);
-  assert.equal(whole.gapTruncated, false, '连续历史不得误报缺口截断');
-  pass('历史缺口截断分析范围时对用户可见');
+  assert.equal(whole.gapTruncated, false, '连续历史不得误报内部缺口');
+  assert.equal(whole.historyShort, true, '连续但只加载80/请求300根时必须提示历史不足');
+
+  const enough: Candle[] = Array.from({ length: 300 }, (_, i) => ({ ts: T0 + i * ms, o: 100, h: 100.4, l: 99.6, c: 100, v: 1_000_000 }));
+  const fullPrefs = { ...allOn, lookback: 300 as const };
+  const complete = analyzeSignals(enough, ms, fullPrefs, null, enough.at(-1)!.ts + ms);
+  assert.equal(complete.gapTruncated, false);
+  assert.equal(complete.historyShort, false, '实际可用根数达到请求后不提示不足');
+  pass('内部缺口与连续但历史不足分别可观测');
 }
 
 console.log(`PASS realtime-stability：${n} 组`);

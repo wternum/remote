@@ -69,8 +69,10 @@ export interface SignalRuntimeState {
   bars: number;
   /** 用户请求的回看根数；bars < requested 说明历史不足或被缺口截断 */
   requested: number;
-  /** 历史缺口把分析范围截断到最新连续段 */
+  /** 内部历史缺口把分析范围截断到最新连续段 */
   gapTruncated: boolean;
+  /** 连续但已加载历史少于用户请求 */
+  historyShort: boolean;
   covered: number;
   flowSupported: boolean;
   flowConnected: boolean;
@@ -80,7 +82,7 @@ export interface SignalRuntimeState {
   visible: SignalItem[];
   total: number;
 }
-export const EMPTY_RUNTIME: SignalRuntimeState = { symbol: '', timeframe: '', status: 'loading', message: '', bars: 0, requested: 600, gapTruncated: false, covered: 0, flowSupported: true, flowConnected: false, flowSyncing: false, updatedAt: 0, counts: emptyCounts(), visible: [], total: 0 };
+export const EMPTY_RUNTIME: SignalRuntimeState = { symbol: '', timeframe: '', status: 'loading', message: '', bars: 0, requested: 600, gapTruncated: false, historyShort: false, covered: 0, flowSupported: true, flowConnected: false, flowSyncing: false, updatedAt: 0, counts: emptyCounts(), visible: [], total: 0 };
 export interface SignalSnapshot { preferences: SignalPreferences; runtime: SignalRuntimeState; focusId: string | null }
 
 /** Stored preferences are untrusted; invalid/obsolete values never reach the scanner. */

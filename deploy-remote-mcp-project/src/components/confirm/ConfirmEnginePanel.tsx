@@ -43,6 +43,8 @@ const MUT = '#8c96ab';
 const LINE = '#1d2534';
 
 const fmt = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '—');
+/** 无亏损时 PF/赔付比在统计层用 99 表示"无穷"；这里与其它面板统一显示 ∞，避免把哨兵值当真值 */
+const ratio = (v: number | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : v >= 99 ? '∞' : v.toFixed(d));
 const pct = (v: number, d = 0) => (Number.isFinite(v) ? `${v.toFixed(d)}%` : '—');
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${fmt(v, d)}`;
 const hhmm = (ts: number) => {
@@ -461,7 +463,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
             <span>拖动即时重算，无需重新拉取行情</span>
             {error && (
               <span className="ml-auto inline-flex items-center gap-1 text-[#f6465d]">
-                <AlertTriangle size={10} /> 扫描失败：{error}
+                <AlertTriangle size={10} /> 扫描提示：{error}
               </span>
             )}
           </div>
@@ -625,7 +627,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                   sub={<Delta v={(now?.totalR ?? 0) - (base?.totalR ?? 0)} suffix="R" digits={1} />}
                 />
                 <Kpi label="成交笔数" value={String(now?.traded ?? 0)} sub={`检出 ${now?.detected ?? 0} · 过滤 ${(now?.detected ?? 0) - (now?.traded ?? 0)}`} />
-                <Kpi label="盈亏因子 PF" value={fmt(now?.pf ?? 0, 2)} tone={(now?.pf ?? 0) >= 1 ? LONG : SHORT} sub={<Delta v={(now?.pf ?? 0) - (base?.pf ?? 0)} suffix="pf" />} />
+                <Kpi label="盈亏因子 PF" value={ratio(now?.pf)} tone={(now?.pf ?? 0) >= 1 ? LONG : SHORT} sub={<Delta v={(now?.pf ?? 0) - (base?.pf ?? 0)} suffix="pf" />} />
                 <Kpi label="最大回撤 R" value={fmt(now?.maxDD ?? 0, 1)} tone={SHORT} sub={<Delta v={-(now?.maxDD ?? 0) + (base?.maxDD ?? 0)} suffix="R" />} />
               </div>
 
@@ -785,7 +787,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                     <span>止损 {pct(stats?.now?.slRate ?? 0)}</span>
                     <span>超时 {pct(stats?.now?.timeRate ?? 0)}</span>
                     <span>平均持仓 {fmt(stats?.now?.avgHold ?? 0, 0)} 根</span>
-                    <span>赔付比 {fmt(stats?.now?.payoff ?? 0, 2)}</span>
+                    <span>赔付比 {ratio(stats?.now?.payoff)}</span>
                     <span>稳定性 R/σ {fmt(stats?.now?.sharpeR ?? 0, 2)}</span>
                   </div>
                 </div>

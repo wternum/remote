@@ -4,3 +4,6 @@ dist/
 .mcp-tools-output.txt
 .verification/
 test-results/
+tsconfig.tsbuildinfo
+.next/
+public/runtime/

@@ -18,8 +18,10 @@ export interface SignalAnalysis {
   bars: number;
   /** 用户请求的回看根数 */
   requested: number;
-  /** 历史缺口把分析范围截断到最新连续段 */
+  /** 内部历史缺口把分析范围截断到最新连续段 */
   gapTruncated: boolean;
+  /** 没有内部缺口，但实际可用历史根数仍少于用户请求 */
+  historyShort: boolean;
   lastPrice: number;
 }
 
@@ -28,7 +30,7 @@ export interface SignalAnalysis {
  * are explicit heuristics and have NOT been calibrated as winning probabilities.
  */
 export function analyzeSignals(candles: Candle[], barMs: number, preferences: SignalPreferences, flow?: FlowSnapshot | null, now = Date.now()): SignalAnalysis {
-  if (!(barMs > 0) || !Number.isFinite(now)) return { items: [], covered: 0, bars: 0, requested: preferences.lookback, gapTruncated: false, lastPrice: 0 };
+  if (!(barMs > 0) || !Number.isFinite(now)) return { items: [], covered: 0, bars: 0, requested: preferences.lookback, gapTruncated: false, historyShort: false, lastPrice: 0 };
   const valid = candles.filter(c =>
     [c.ts, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite) && c.ts <= now && c.v >= 0 &&
     c.o > 0 && c.c > 0 && c.h >= Math.max(c.o, c.c) && c.l <= Math.min(c.o, c.c) && c.l > 0,
@@ -46,7 +48,15 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   // 形成中 K 线只用于盘中预警；所有形态判定仍用上面过滤出的 closed。
   const forming = cs.length > 0 && newest && newest.ts === cs[cs.length - 1].ts + barMs && newest.ts + barMs > now
     ? newest : undefined;
-  if (cs.length < 30) return { items: [], covered: 0, bars: inScope.length, requested: preferences.lookback, gapTruncated: contiguousStart > 0 && inScope.length < preferences.lookback, lastPrice };
+  if (cs.length < 30) {
+    const gapTruncated = contiguousStart > 0 && inScope.length < preferences.lookback;
+    return {
+      items: [], covered: 0, bars: inScope.length, requested: preferences.lookback,
+      gapTruncated,
+      historyShort: !gapTruncated && inScope.length < preferences.lookback,
+      lastPrice,
+    };
+  }
   const ctx = buildContext(cs, flow);
   const cutoff = inScope[0]?.ts ?? 0;
   const items: SignalItem[] = [];
@@ -248,6 +258,7 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     // 加密货币连续交易：历史缺口会让分析只覆盖最新连续段。范围变小必须对用户可见，
     // 否则「识别数 0」看起来像检测器坏了，其实是没有那么多连续历史。
     gapTruncated: contiguousStart > 0 && inScope.length < preferences.lookback,
+    historyShort: contiguousStart === 0 && inScope.length < preferences.lookback,
     lastPrice,
   };
 }

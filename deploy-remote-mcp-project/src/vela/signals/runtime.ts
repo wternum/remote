@@ -9,7 +9,7 @@ import { signalRecomputeKey, flowRecomputeKey } from './recompute';
 import { EMPTY_RUNTIME, flowRequested, emptyCounts, emptySignalPayload, type SignalStore } from './store';
 
 type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: AnnPayload) => void } };
-const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, lastPrice: 0 });
+const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, historyShort: false, lastPrice: 0 });
 
 /** The runtime belongs to the workspace, never the panel. Closing the sidebar leaves it alive. */
 export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () => void {
@@ -68,7 +68,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
       symbol, timeframe,
       status: !preferences.enabled ? 'paused' : loadError ? 'error' : loading ? 'loading' : 'ready',
       message: loadError,
-      bars: analysis.bars, requested: analysis.requested, gapTruncated: analysis.gapTruncated, covered: analysis.covered,
+      bars: analysis.bars, requested: analysis.requested, gapTruncated: analysis.gapTruncated, historyShort: analysis.historyShort, covered: analysis.covered,
       flowSupported: !!period, flowConnected: !!snap?.tape.connected,
       flowSyncing: flowBusy, updatedAt: lastScanAt,
       counts: projected.counts, visible: projected.visible, total: projected.visible.length,

@@ -1,3 +1,0 @@
-{
-  "/api/okx/[...path]/route": "app/api/okx/[...path]/route.js"
-}

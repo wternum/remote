@@ -89,7 +89,7 @@ export default function SignalPanel({ store, ctx }: { store: SignalStore; ctx: W
     </div>
     <div className="sa-data-status" title="真实覆盖是当前分析范围中买卖成交额完整的K线根数，不是信号数。">
       <div><span className="sa-connection"><i className={`sa-dot ${state.flowConnected && prefs.enabled ? 'is-live' : ''}`} />{flowText}</span><span className="sa-coverage">{state.covered} / {state.bars} 根</span></div>
-      <div><span>{state.gapTruncated ? `缺口截断 · 回看${state.requested}` : '真实成交覆盖'}</span><span>{state.updatedAt ? `${formatTime(state.updatedAt)} UTC` : '等待行情'}</span></div>
+      <div><span>{state.gapTruncated ? `缺口截断 · 回看${state.requested}` : state.historyShort ? `历史不足 · 请求${state.requested}` : '真实成交覆盖'}</span><span>{state.updatedAt ? `${formatTime(state.updatedAt)} UTC` : '等待行情'}</span></div>
     </div>
   </div>;
 }

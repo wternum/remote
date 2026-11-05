@@ -162,7 +162,7 @@ const run = (cs: Candle[], p = W, flow?: FlowSnapshot | null, livePrice?: number
 {
   const cs = flat(200), old = run(cs), now = cs.at(-1)!.ts + MS;
   assert.equal(old.story!.active, false);
-  const analysis = { items: [old], bars: cs.length, covered: 0, requested: 600, gapTruncated: false, lastPrice: cs.at(-1)!.c };
+  const analysis = { items: [old], bars: cs.length, covered: 0, requested: 600, gapTruncated: false, historyShort: false, lastPrice: cs.at(-1)!.c };
   const normal = projectSignals(analysis, DEFAULT_PREFERENCES);
   assert.equal(normal.payload.events.length, 0);
   const focused = projectSignals(analysis, DEFAULT_PREFERENCES, old.id);

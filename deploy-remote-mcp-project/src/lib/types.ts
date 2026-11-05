@@ -99,6 +99,8 @@ export interface BookLevel {
 
 export interface MarketData {
   live: boolean;
+  /** 服务端历史 K 线存在缺根/未取满时为 true；UI 不应把这份数据当连续样本 */
+  gapped?: boolean;
   symbol: string;
   bar: string;
   candles: Candle[];
@@ -200,6 +202,10 @@ export interface OverallStat {
 
 export interface BacktestResult {
   live: boolean;
+  /** 只有真实且连续的行情才会生成统计；false 表示已 fail-closed 跳过计算 */
+  dataReady?: boolean;
+  gapped?: boolean;
+  dataIssue?: string;
   scope: "single" | "all";
   symbol: string;
   bar: string;

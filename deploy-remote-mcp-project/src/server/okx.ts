@@ -1,45 +1,74 @@
 import { Candle, BookLevel } from "@/lib/types";
-import { barMs } from "@/lib/types";
+import { barMs, ctValOf } from "@/lib/types";
 import { quoteVolumeFromRow } from "@/lib/okxVolume";
 
 const BASE = "https://www.okx.com";
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// ─── 全局限速闸门 ─────────────────────────────────────────
+// OKX 公共行情按 IP 限频（history-candles 约 20 次 / 2 秒）。原实现对每页历史
+// 并发 8 个请求、且各调用方互不知情：3 币种冷启动实测 703 次请求里 516 次被
+// 429，失败页被 `catch(() => [])` 吞掉后留下 1200–2800 根缺口。这里用进程级
+// 串行闸门统一节流（≈9 req/s），让并发调用方排队而不是互相打限频。
+const MIN_REQUEST_GAP_MS = 110;
+let gateChain: Promise<void> = Promise.resolve();
+function rateGate(): Promise<void> {
+  const next = gateChain.then(() => sleep(MIN_REQUEST_GAP_MS));
+  // 闸门自身不能因为某次请求失败而中断后续排队
+  gateChain = next.catch(() => undefined);
+  return next;
+}
+
+class OkxError extends Error {
+  constructor(
+    message: string,
+    /** 4xx（除 429）是确定性失败，重试无意义 */
+    readonly retryable = true,
+  ) {
+    super(message);
+    this.name = "OkxError";
+  }
+}
+
 // ─── 基础请求 ─────────────────────────────────────────────
-async function okxGet(path: string, params: Record<string, string>, timeoutMs = 3000) {
+async function okxGet(path: string, params: Record<string, string>, timeoutMs = 5000) {
+  // 只有 K 线接口共享「20 次 / 2 秒」的 IP 配额；ticker / books 等各有独立配额，
+  // 一起排队反而白白增加首屏延时。
+  if (path.includes("candles")) await rateGate();
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(url.toString(), { signal: ctl.signal });
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    if (!res.ok) throw new OkxError("HTTP " + res.status, res.status === 429 || res.status >= 500);
     const json = (await res.json()) as { code?: string; data?: unknown };
-    if (json.code && json.code !== "0") throw new Error("OKX code " + json.code);
+    if (json.code && json.code !== "0") throw new OkxError("OKX code " + json.code);
     return json.data;
   } finally {
     clearTimeout(t);
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// 带重试的公共行情请求（应对限频）
+// 带重试的公共行情请求（应对限频；确定性失败立即放弃）
 async function okxGetRetry(
   path: string,
   params: Record<string, string>,
-  tries = 4,
+  tries = 3,
 ): Promise<(string | number)[][]> {
   let lastErr: unknown = null;
   for (let t = 0; t < tries; t++) {
     try {
-      const d = await okxGet(path, params);
+      const d = await okxGet(path, params, 8000);
       return (d as (string | number)[][]) ?? [];
     } catch (e) {
       lastErr = e;
+      if (e instanceof OkxError && !e.retryable) break;
       if (t < tries - 1) await sleep(300 * (t + 1));
     }
   }
-  throw lastErr;
+  throw lastErr instanceof Error ? lastErr : new Error("OKX request failed");
 }
 
 // 防御性解析：官方格式 [ts,o,h,l,c,vol,volCcy,volCcyQuote,(confirm)]
@@ -56,57 +85,125 @@ function parseCandleRow(row: (string | number)[], symbol: string): Candle | null
 }
 
 // ─── 实时拉取 ─────────────────────────────────────────────
+export interface HistoryResult {
+  candles: Candle[];
+  /** 相邻 K 线之间的缺失根数（>0 表示数据不连续，不可当作真实行情缓存/落库） */
+  missingBars: number;
+  /** OKX 该合约上市较晚、历史本来就不到请求根数（与缺口区分） */
+  short: boolean;
+}
+
+/**
+ * 拉取 `count` 根历史 K 线，并显式报告缺口。
+ *
+ * 旧实现把失败页 `catch(() => [])` 后照常返回，调用方无法区分“真实连续行情”
+ * 与“缺了几千根的行情”。现在：失败页会重试一轮，最终仍失败时通过 missingBars
+ * 上报，由上层决定是否缓存 / 落库。
+ */
+export async function fetchCandlesWithMeta(
+  symbol: string,
+  bar: string,
+  count: number,
+): Promise<HistoryResult> {
+  const want = Math.max(1, Math.min(count, 12_000));
+  const bm = barMs(bar);
+  const map = new Map<number, Candle>();
+  const add = (rows: (string | number)[][] | undefined) => {
+    for (const r of rows ?? []) {
+      const c = parseCandleRow(r, symbol);
+      if (c) map.set(c.ts, c);
+    }
+  };
+
+  const first = await okxGetRetry("/api/v5/market/candles", {
+    instId: symbol,
+    bar,
+    limit: String(Math.min(300, want)),
+  });
+  add(first);
+  if (map.size === 0) throw new OkxError("empty candles", false);
+
+  if (map.size < want) {
+    const oldest = Math.min(...map.keys());
+    const pages = Math.ceil((want - map.size) / 100);
+    const failed: number[] = [];
+    const loadPage = async (k: number) => {
+      // 第 k 页取「紧邻上一页最老一根之前」的 100 根：after 必须从 0 偏移开始，
+      // 多跳一页会在首页与历史页之间留下 100 根缺口（旧实现用的是 k * 100 * bm）。
+      const rows = await okxGetRetry("/api/v5/market/history-candles", {
+        instId: symbol,
+        bar,
+        after: String(oldest - k * 100 * bm),
+        limit: "100",
+      });
+      add(rows);
+    };
+    // 闸门已经保证全局不超过 ~9 req/s，并行只是为了让排队更紧凑；
+    // 失败页收集起来做一轮针对性重试（旧实现直接吞掉 → 直接产生缺口）。
+    await Promise.all(
+      Array.from({ length: pages }, (_, k) =>
+        loadPage(k).catch(() => {
+          failed.push(k);
+        }),
+      ),
+    );
+    if (failed.length) {
+      await Promise.all(
+        [...new Set(failed)].map((k) =>
+          loadPage(k).catch(() => {
+            /* 仍失败则由 missingBars 如实上报 */
+          }),
+        ),
+      );
+    }
+  }
+
+  const sorted = [...map.values()].sort((a, b) => a.ts - b.ts);
+  let missingBars = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const step = Math.round((sorted[i].ts - sorted[i - 1].ts) / bm);
+    if (step > 1) missingBars += step - 1;
+  }
+  return { candles: sorted.slice(-want), missingBars, short: sorted.length < want };
+}
+
+/** 兼容旧签名：只要 K 线本身（缺口信息由 getCandles 负责） */
 export async function fetchCandlesLive(
   symbol: string,
   bar: string,
   count: number,
 ): Promise<Candle[]> {
-  const first = (await okxGet("/api/v5/market/candles", {
-    instId: symbol,
-    bar,
-    limit: String(Math.min(300, count)),
-  })) as (string | number)[][];
-  const rows: Candle[] = [];
-  for (const r of first ?? []) {
-    const c = parseCandleRow(r, symbol);
-    if (c) rows.push(c);
-  }
-  if (rows.length === 0) throw new Error("empty candles");
-  rows.sort((a, b) => a.ts - b.ts);
+  const { candles } = await fetchCandlesWithMeta(symbol, bar, count);
+  return candles;
+}
 
-  if (count > rows.length) {
-    const need = count - rows.length;
-    const pages = Math.ceil(need / 100);
-    const oldest = rows[0].ts;
-    const bm = barMs(bar);
-    // 分批并发（每批 8 个），避免触发 OKX 公共接口限频导致 K 线缺口
-    const results: (string | number)[][][] = [];
-    for (let start = 0; start < pages; start += 8) {
-      const batch = await Promise.all(
-        Array.from({ length: Math.min(8, pages - start) }, (_, q) =>
-          okxGetRetry("/api/v5/market/history-candles", {
-            instId: symbol,
-            bar,
-            after: String(oldest - (start + q) * 100 * bm),
-            limit: "100",
-          }).catch(() => [] as (string | number)[][]),
-        ),
-      );
-      results.push(...batch);
-      if (start + 8 < pages) await sleep(250);
-    }
-    for (const page of results) {
-      for (const r of page ?? []) {
-        const c = parseCandleRow(r, symbol);
-        if (c && c.ts < oldest) rows.push(c);
+// 轻量轮询专用微缓存：多标签页同时 tail 轮询时只打一次上游
+const TAIL_TTL = 1500;
+const tailCache = new Map<string, { at: number; candles: Candle[] }>();
+const tailInflight = new Map<string, Promise<Candle[]>>();
+
+export async function fetchCandlesTail(symbol: string, bar: string, count = 3): Promise<Candle[]> {
+  const key = `${symbol}|${bar}|${count}`;
+  const hit = tailCache.get(key);
+  if (hit && Date.now() - hit.at < TAIL_TTL) return hit.candles;
+  const running = tailInflight.get(key);
+  if (running) return running;
+  const job = fetchCandlesLive(symbol, bar, count)
+    .then((candles) => {
+      tailCache.delete(key);
+      tailCache.set(key, { at: Date.now(), candles });
+      while (tailCache.size > 12) {
+        const oldest = tailCache.keys().next().value;
+        if (oldest === undefined) break;
+        tailCache.delete(oldest);
       }
-    }
-  }
-
-  const map = new Map<number, Candle>();
-  for (const c of rows) map.set(c.ts, c);
-  const sorted = [...map.values()].sort((a, b) => a.ts - b.ts);
-  return sorted.slice(-count);
+      return candles;
+    })
+    .finally(() => {
+      if (tailInflight.get(key) === job) tailInflight.delete(key);
+    });
+  tailInflight.set(key, job);
+  return job;
 }
 
 export async function fetchTickerLive(symbol: string) {
@@ -180,7 +277,7 @@ function mulberry32(seed: number) {
 const SYNTH_BASE: Record<string, { price: number; vol: number; volUnit: number }> = {
   "BTC-USDT-SWAP": { price: 97400, vol: 0.0011, volUnit: 9200 },
   "ETH-USDT-SWAP": { price: 3625, vol: 0.0016, volUnit: 26000 },
-  "SOL-USDT-SWAP": { price: 214, vol: 0.0022, volUnit: 42000 },
+  "SOL-USDT-SWAP": { price: 214, vol: 0.0022, volUnit: 9000 },
 };
 
 export function synthCandles(symbol: string, bar: string, count: number, endTs?: number): Candle[] {
@@ -198,7 +295,11 @@ export function synthCandles(symbol: string, bar: string, count: number, endTs?:
     regime = regime * 0.982 + (rng() - 0.5) * 0.09;
     if (rng() < 0.012) regime += (rng() - 0.5) * 0.9; // 偶发行情
     const vScale = 1 + 1.6 * Math.abs(regime) + (rng() < 0.06 ? rng() * 2.4 : 0);
-    const ret = regime * 0.16 + (rng() + rng() - 1) * cfg.vol * vScale;
+    // 趋势项必须按波动率缩放：旧实现 regime * 0.16 每根带约 2% 的持续漂移，
+    // 600 根后价格比可达 1e8、8640 根达 1e28（实测），降级行情完全不可用。
+    // 这里保留可识别的趋势段，同时用很弱的对数回归把价格限制在基准附近。
+    const pull = -0.0015 * Math.log(price / cfg.price);
+    const ret = regime * cfg.vol * 1.6 + pull + (rng() + rng() - 1) * cfg.vol * vScale;
     const o = price * (rng() < 0.02 ? 1 + (rng() - 0.5) * cfg.vol * 6 : 1);
     // 4 步子路径
     let p = o;
@@ -216,18 +317,21 @@ export function synthCandles(symbol: string, bar: string, count: number, endTs?:
     lo = Math.min(lo, o, c) * (1 - rng() * cfg.vol * 0.5 * vScale);
     const bodyPct = Math.abs(c - o) / o;
     // 仿真成交量按"张"生成，再折算为 USDT 成交额，保持与真实数据同口径
-    const v = cfg.volUnit * (0.45 + rng() * 0.8) * (1 + bodyPct / cfg.vol / 2.2) * c;
+    // 张数 × 面值 = 币数，× 价格 = USDT 成交额（旧实现漏乘面值：BTC 偏大 100 倍、ETH 10 倍）
+    const v = cfg.volUnit * ctValOf(symbol) * (0.45 + rng() * 0.8) * (1 + bodyPct / cfg.vol / 2.2) * c;
     out.push({ ts: start + i * bm, o, h: hi, l: lo, c, v });
     price = c;
   }
   return out;
 }
 
-export function synthTicker(candles: Candle[]) {
+export function synthTicker(candles: Candle[], bar = "5m") {
   const last = candles[candles.length - 1];
-  const open24 = candles[Math.max(0, candles.length - 1 - 288)]?.c ?? last.o;
-  const highs = candles.slice(-288).map((c) => c.h);
-  const lows = candles.slice(-288).map((c) => c.l);
+  // 24h 窗口必须按周期换算：288 根只对 5m 成立，15m 会算成 3 天、1m 会算成 4.8 小时。
+  const bars24h = Math.max(1, Math.round(86_400_000 / barMs(bar)));
+  const open24 = candles[Math.max(0, candles.length - 1 - bars24h)]?.c ?? last.o;
+  const highs = candles.slice(-bars24h).map((c) => c.h);
+  const lows = candles.slice(-bars24h).map((c) => c.l);
   return {
     last: last.c,
     open24,
@@ -250,27 +354,157 @@ export function synthBook(last: number, seedExtra = 0): { bids: BookLevel[]; ask
 }
 
 // ─── 带缓存的统一入口 ─────────────────────────────────────
-const cache = new Map<string, { at: number; live: boolean; data: Candle[] }>();
+export interface CandleSet {
+  live: boolean;
+  /** 上游返回的 K 线不连续（缺口）；不得当作真实行情落库或长期缓存 */
+  gapped: boolean;
+  candles: Candle[];
+}
+
+interface CacheEntry {
+  at: number;
+  live: boolean;
+  gapped: boolean;
+  data: Candle[];
+  /** 这次拉取"请求"的根数。数据没取满（限频/上游拒绝）时 data.length < want，
+   *  命中判断必须看 want，否则失败结果永远不命中缓存 → 每次请求都整段重拉。 */
+  want: number;
+  /** 最近一次拿到"最新一根"的时间。拉取时最新一根还在形成，只有部分成交量。 */
+  tailAt: number;
+}
+
+// 缓存键去掉 count：一次深拉（回测 8640 根）即可服务图表 600 根、引擎面板更深的请求，
+// 避免同一 symbol|bar 被不同 count 反复整段拉取。
+// 容量上限防止任意 symbol 参数把进程内存撑爆（实测无上限时 60 次请求 +171MB）。
+const CACHE_MAX = 12;
+const TTL_LIVE = 120_000;
+const TTL_DEGRADED = 15_000;
+const cache = new Map<string, CacheEntry>();
+const inflight = new Map<string, { promise: Promise<CandleSet>; count: number }>();
+
+const tailRefresh = new Map<string, Promise<boolean>>();
+
+/** 两份 K 线按时间戳合并，同一根取成交额更大者（一根 K 线内成交额只增不减）。 */
+function mergeByTs(base: Candle[], incoming: Candle[]): Candle[] {
+  const map = new Map<number, Candle>();
+  for (const c of base) map.set(c.ts, c);
+  for (const c of incoming) {
+    const prev = map.get(c.ts);
+    map.set(c.ts, !prev || c.v >= prev.v ? c : prev);
+  }
+  return [...map.values()].sort((a, b) => a.ts - b.ts);
+}
+
+function holesOf(cs: Candle[], bm: number): number {
+  let n = 0;
+  for (let i = 1; i < cs.length; i++) {
+    const step = Math.round((cs[i].ts - cs[i - 1].ts) / bm);
+    if (step > 1) n += step - 1;
+  }
+  return n;
+}
+
+/**
+ * 缓存拉取时，最新一根还在形成、只有部分成交量。这根收盘后，缓存（TTL 120s）
+ * 仍会把残缺数据当成"已收盘 K 线"交给回测和引擎（实测只有完整量的 67%）。
+ * 这里只补拉最新 300 根（1 次请求，同 key 并发合并），替换掉残缺的那根。
+ * 返回 false 表示补拉失败，调用方必须整段重拉，不能继续用残缺缓存。
+ */
+function refreshTail(key: string, entry: CacheEntry, symbol: string, bar: string): Promise<boolean> {
+  const running = tailRefresh.get(key);
+  if (running) return running;
+  const job = (async () => {
+    try {
+      const rows = await okxGetRetry("/api/v5/market/candles", { instId: symbol, bar, limit: "300" });
+      const fresh: Candle[] = [];
+      for (const r of rows) {
+        const c = parseCandleRow(r, symbol);
+        if (c) fresh.push(c);
+      }
+      if (!fresh.length) return false;
+      const bm = barMs(bar);
+      const merged = mergeByTs(entry.data, fresh).slice(-Math.max(entry.data.length, 1));
+      // 补拉窗口必须和缓存首尾相接；接不上（离线太久）就放弃，交给整段重拉
+      if (holesOf(merged, bm) > holesOf(entry.data, bm)) return false;
+      entry.data = merged;
+      entry.tailAt = Date.now();
+      return true;
+    } catch {
+      return false;
+    }
+  })().finally(() => {
+    if (tailRefresh.get(key) === job) tailRefresh.delete(key);
+  });
+  tailRefresh.set(key, job);
+  return job;
+}
+
+function remember(key: string, entry: CacheEntry) {
+  cache.delete(key);
+  cache.set(key, entry);
+  while (cache.size > CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
 
 export async function getCandles(
   symbol: string,
   bar: string,
   count: number,
   fresh = false,
-): Promise<{ live: boolean; candles: Candle[] }> {
-  const key = `${symbol}|${bar}|${count}`;
+): Promise<CandleSet> {
+  const key = `${symbol}|${bar}`;
+
   if (!fresh) {
     const hit = cache.get(key);
-    if (hit && Date.now() - hit.at < 120_000) return { live: hit.live, candles: hit.data };
+    // 命中条件：这份结果当初就是为 >= count 的请求拉的（即使没取满），
+    // 短结果交给较短的 TTL_DEGRADED 冷却，期间不再打上游（实测限频时一次请求 37 次上游调用，
+    // 修复前连续 3 次请求各重拉一遍）。
+    if (hit && (hit.data.length >= count || hit.want >= count)) {
+      const ttl = hit.live && !hit.gapped ? TTL_LIVE : TTL_DEGRADED;
+      if (Date.now() - hit.at < ttl) {
+        const last = hit.data[hit.data.length - 1];
+        const bm = barMs(bar);
+        const formingAtFetch = !!last && last.ts + bm > hit.tailAt;
+        const closedSince = !!last && last.ts + bm <= Date.now();
+        // 合成数据没有"残缺最新一根"的问题，只处理真实行情
+        const usable = !(hit.live && formingAtFetch && closedSince) || (await refreshTail(key, hit, symbol, bar));
+        if (usable) return { live: hit.live, gapped: hit.gapped, candles: hit.data.slice(-count) };
+      }
+    }
+    // 冷启动时回测 / 引擎面板 / 图表常常同时请求同一份数据：
+    // 旧实现各拉一遍（实测 437 次上游请求，267 次 429），这里同 key 共用一次拉取。
+    const pending = inflight.get(key);
+    if (pending && pending.count >= count) {
+      const r = await pending.promise;
+      return { live: r.live, gapped: r.gapped, candles: r.candles.slice(-count) };
+    }
   }
+
+  const job = (async (): Promise<CandleSet> => {
+    try {
+      const { candles, missingBars, short } = await fetchCandlesWithMeta(symbol, bar, count);
+      if (candles.length < Math.min(count, 200)) throw new Error("insufficient live data");
+      // 三种不完整必须区分对待，且都不能当成"完整真实行情"：
+      //  missingBars > 0 —— 返回窗口内部有洞（历史页被限频/失败）
+      //  short           —— 根本没取满请求根数（上游拒绝或该合约历史确实短）
+      // 只判断 missingBars 会把"请求 900 根只拿到 300 根"误判为完整（缺口检测只看窗口内部）。
+      const gapped = missingBars > 0 || short;
+      remember(key, { at: Date.now(), live: true, gapped, data: candles, want: count, tailAt: Date.now() });
+      return { live: true, gapped, candles };
+    } catch {
+      const candles = synthCandles(symbol, bar, count);
+      remember(key, { at: Date.now(), live: false, gapped: false, data: candles, want: count, tailAt: Date.now() });
+      return { live: false, gapped: false, candles };
+    }
+  })();
+
+  inflight.set(key, { promise: job, count });
   try {
-    const candles = await fetchCandlesLive(symbol, bar, count);
-    if (candles.length < Math.min(count, 200)) throw new Error("insufficient live data");
-    cache.set(key, { at: Date.now(), live: true, data: candles });
-    return { live: true, candles };
-  } catch {
-    const candles = synthCandles(symbol, bar, count);
-    cache.set(key, { at: Date.now(), live: false, data: candles });
-    return { live: false, candles };
+    return await job;
+  } finally {
+    if (inflight.get(key)?.promise === job) inflight.delete(key);
   }
 }

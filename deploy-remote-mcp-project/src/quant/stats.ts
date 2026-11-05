@@ -6,6 +6,9 @@ export interface Summary {
   traded: number;
   wins: number;
   losses: number;
+  /** R 恰好为 0 的笔数（保本被成本磨平）：不计入胜负 */
+  flat: number;
+  flatRate: number;
   winRate: number;
   avgR: number;
   totalR: number;
@@ -51,6 +54,8 @@ const EMPTY: Summary = {
   traded: 0,
   wins: 0,
   losses: 0,
+  flat: 0,
+  flatRate: 0,
   winRate: 0,
   avgR: 0,
   totalR: 0,
@@ -79,6 +84,7 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
   let grossLoss = 0;
   let wins = 0;
   let losses = 0;
+  let flat = 0;
   let tp = 0;
   let sl = 0;
   let time = 0;
@@ -91,12 +97,16 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
   for (const o of done) {
     const r = o.r;
     rs.push(r);
+    // r 恰好为 0（保本离场被手续费/滑点磨平）既不是盈利也不是亏损：
+    // 旧实现把它计入 losses，会虚增亏损笔数并压低赔付比的分母口径。
     if (r > 0) {
       wins++;
       grossWin += r;
-    } else {
+    } else if (r < 0) {
       losses++;
       grossLoss += -r;
+    } else {
+      flat++;
     }
     if (o.why === 'tp') tp++;
     else if (o.why === 'sl') sl++;
@@ -117,6 +127,8 @@ export function summarize(cands: Candidate[], threshold = 0): Summary {
     traded: n,
     wins,
     losses,
+    flat,
+    flatRate: (flat / n) * 100,
     winRate: (wins / n) * 100,
     avgR,
     totalR: cum,
@@ -191,10 +203,11 @@ export function attribution(cands: Candidate[], threshold: number): FactorAttrib
       covered++;
       if (c.proba >= threshold) used++;
       else killed++;
+      // r===0 既不是赢也不是亏（与 summarize 的 flat 口径一致），不参与盈亏证据对比
       if (c.outcome!.r > 0) {
         winSum += e;
         winN++;
-      } else {
+      } else if (c.outcome!.r < 0) {
         lossSum += e;
         lossN++;
       }
@@ -250,7 +263,9 @@ export function topKillers(cands: Candidate[], threshold: number) {
 
 export function gradeDistribution(cands: Candidate[]) {
   const g = { A: 0, B: 0, C: 0, D: 0 };
-  for (const c of cands) if (tradable(c)) g[c.grade]++;
+  // 未知等级直接跳过：此前 g[undefined]++ 会生成一个值为 NaN 的 "undefined" 键，
+  // 并作为第 5 个对象带着 NaN 输出。
+  for (const c of cands) if (tradable(c) && c.grade in g) g[c.grade]++;
   const total = g.A + g.B + g.C + g.D || 1;
   return (Object.keys(g) as (keyof typeof g)[]).map(k => ({ grade: k, n: g[k], pct: (g[k] / total) * 100 }));
 }

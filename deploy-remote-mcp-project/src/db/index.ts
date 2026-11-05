@@ -52,9 +52,7 @@ function ensureServerSchema(): Promise<void> {
 function getDatabase() {
   if (!database && !isBrowser) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { Pool } = require('pg');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { drizzle } = require('drizzle-orm/node-postgres');
       const databaseUrl = process.env.DATABASE_URL;
       if (databaseUrl) {
@@ -159,7 +157,13 @@ export function initializeDatabase(): Promise<void> {
       window.addEventListener('pagehide', event => {
         if (!event.persisted) void client?.close();
       }, { once: true });
-    })();
+    })().catch(error => {
+      // 失败不得永久缓存 rejected Promise：否则同一页面生命周期内 PGlite 再也
+      // 不会重试，只能刷新页面（与 server 分支清除 serverSchema 的行为对齐）。
+      initialization = undefined;
+      database = undefined;
+      throw error;
+    });
   }
   return initialization;
 }

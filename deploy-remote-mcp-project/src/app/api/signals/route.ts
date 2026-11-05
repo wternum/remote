@@ -1,5 +1,6 @@
 import { db, initializeDatabase } from "@/db";
 import { sql } from "drizzle-orm";
+import { SCAN_BARS_ALLOWED, SYMBOL_IDS, badRequest } from "@/lib/market";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,14 @@ export async function POST(req: Request) {
     const body = (await req.json()) as LiveSignalBody;
     if (!body?.id || !body?.symbol) {
       return Response.json({ error: "missing fields" }, { status: 400 });
+    }
+    // 写入接口此前不做任何白名单校验：任意标的/周期都能永久写进 signals，
+    // 与读接口的 400 校验不一致。这里统一拒绝。
+    if (!SYMBOL_IDS.includes(body.symbol)) {
+      return badRequest(`unknown symbol: ${body.symbol}`);
+    }
+    if (body.bar && !(SCAN_BARS_ALLOWED as readonly string[]).includes(body.bar)) {
+      return badRequest(`unsupported bar: ${body.bar}`);
     }
     await db.execute(
       sql`
