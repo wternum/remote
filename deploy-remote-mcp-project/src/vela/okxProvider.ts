@@ -249,11 +249,11 @@ export class OKXProvider implements DataProvider {
       onBatch(out);
       return out;
     };
-    const first = await okxGet(
-      '/api/v5/market/candles',
-      { instId: ticker, bar, limit: '300', ...(range.to ? { after: String(range.to + tfMs(timeframe)) } : {}) },
-      opts?.signal,
-    );
+    const firstParams = { instId: ticker, bar, limit: '300', ...(range.to ? { after: String(range.to + tfMs(timeframe)) } : {}) };
+    let first = await okxGet('/api/v5/market/candles', firstParams, opts?.signal);
+    if (!first.length && range.to) {
+      first = await okxGet('/api/v5/market/history-candles', firstParams, opts?.signal);
+    }
     for (const r of first) {
       const b = parseRow(r, ticker);
       if (b) map.set(b.time, b);
@@ -266,7 +266,7 @@ export class OKXProvider implements DataProvider {
       if (range.from && oldest <= range.from) break;
       let page: (string | number)[][] = [];
       try {
-        page = await okxGet('/api/v5/market/history-candles', { instId: ticker, bar, after: String(oldest), limit: '100' }, opts?.signal);
+        page = await okxGet('/api/v5/market/history-candles', { instId: ticker, bar, after: String(oldest), limit: '300' }, opts?.signal);
       } catch {
         break;
       }
@@ -281,7 +281,7 @@ export class OKXProvider implements DataProvider {
       }
       if (!added) break;
       oldest = Math.min(oldest, ...page.map(r => Number(r[0])));
-      if (guard % 5 === 0) {
+      if (guard % 2 === 0) {
         emit();
         await new Promise(r => setTimeout(r, 120));
       }

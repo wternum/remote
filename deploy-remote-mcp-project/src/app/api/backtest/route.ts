@@ -5,6 +5,7 @@ import { getCandles } from "@/server/okx";
 import { simulate, summarize, MAX_HOLD_5M, MAX_HOLD_15M } from "@/lib/engine";
 import { SYMBOLS, type BacktestResult, type TradedSignal } from "@/lib/types";
 import { clampThreshold, configFromCookie } from "@/quant/config";
+import { getFlow, syncFlow, type FlowSnapshot } from "@/quant/flow";
 import { closedCandles } from "@/lib/candles";
 import { SCAN_BARS_ALLOWED, badRequest, parseBar, parseSymbol } from "@/lib/market";
 import { setBounded } from "@/lib/lru";
@@ -87,15 +88,21 @@ export async function GET(req: Request) {
   };
   const symbols = symbol === "ALL" ? SYMBOLS.map((s) => s.id as string) : [symbol];
 
-  // 逐个币种拉取，避免触发 OKX 历史 K 线限频导致数据缺口
-  const loaded: Awaited<ReturnType<typeof getCandles>>[] = [];
-  // 顺序拉取：getCandles 内部已有进程级限速与请求合并，这里并发只会放大 429 风险
+  // 逐个币种拉取 K 线（共享 candles 限速闸门），同时把独立配额的 rubik 订单流同步重叠在后台并发进行
+  const loaded: Array<Awaited<ReturnType<typeof getCandles>> & { flowPromise?: Promise<FlowSnapshot | null> }> = [];
   for (const s of symbols) {
     const loadedOne = await getCandles(s, bar, btBars(bar), fresh);
     // Keep chart/forming-candle data out of the closed-bar simulation and its
     // metadata (bars/from/to), so the response describes the same sample that
     // was actually traded.
-    loaded.push({ ...loadedOne, candles: closedCandles(loadedOne.candles, bar) });
+    const candles = closedCandles(loadedOne.candles, bar);
+    const flowPromise =
+      loadedOne.live && !loadedOne.gapped && candles.length
+        ? typeof window === "undefined"
+          ? syncFlow(s, bar, { minTs: candles[0]?.ts ?? 0, maxPages: 4, oiPages: 2 }).catch(() => null)
+          : Promise.resolve(getFlow(s, bar) ?? null)
+        : undefined;
+    loaded.push({ ...loadedOne, candles, flowPromise });
   }
   const recs: TradedSignal[] = [];
   let from = Infinity;
@@ -103,21 +110,24 @@ export async function GET(req: Request) {
   let bars = 0;
   let live = true;
   let gapped = false;
-  loaded.forEach(({ live: lv, gapped: gp, candles }, idx) => {
-    live = live && lv;
-    gapped = gapped || gp;
-    bars += candles.length;
-    if (candles.length) {
-      from = Math.min(from, candles[0].ts);
-      to = Math.max(to, candles[candles.length - 1].ts);
+  for (const item of loaded) {
+    live = live && item.live;
+    gapped = gapped || item.gapped;
+    bars += item.candles.length;
+    if (item.candles.length) {
+      from = Math.min(from, item.candles[0].ts);
+      to = Math.max(to, item.candles[item.candles.length - 1].ts);
     }
-    // 关键正确性门：合成行情或有缺口的数据不能生成交易统计。
-    // 否则“gapped=true”虽回显给调用方，结果仍按一条连续时间轴回测，错误 R/胜率会被用户当真。
-    if (lv && !gp) recs.push(...simulate(candles, symbols[idx], bar, opts));
-  });
+  }
   const dataReady = live && !gapped;
-  // ALL 多标的只要有一份样本不完整，整组统计都不可比；不能静默保留其它币种的部分结果。
-  if (!dataReady) recs.length = 0;
+  // 关键正确性门：合成行情或有缺口的数据不能生成交易统计；ALL 多标的只要有一份样本不完整，整组跳过。
+  if (dataReady) {
+    for (let idx = 0; idx < loaded.length; idx++) {
+      const { candles, flowPromise } = loaded[idx];
+      const flowSnap = flowPromise ? await flowPromise : null;
+      recs.push(...simulate(candles, symbols[idx], bar, opts, undefined, undefined, flowSnap));
+    }
+  }
 
   const res = summarize(recs, {
     symbol,

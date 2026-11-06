@@ -92,7 +92,7 @@ export interface AnnPayload {
   rev: number;
 }
 
-export const EMPTY_PAYLOAD: AnnPayload = { levels: [], events: [], zones: [], position: null, obstacles: [], decimals: 2, rev: 0 };
+
 
 export const TONE_COLOR: Record<AnnTone, string> = {
   top: '#f6465d',

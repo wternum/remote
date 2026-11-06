@@ -11,14 +11,19 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // 并发 8 个请求、且各调用方互不知情：3 币种冷启动实测 703 次请求里 516 次被
 // 429，失败页被 `catch(() => [])` 吞掉后留下 1200–2800 根缺口。这里用进程级
 // 串行闸门统一节流（≈9 req/s），让并发调用方排队而不是互相打限频。
-const MIN_REQUEST_GAP_MS = 110;
-let gateChain: Promise<void> = Promise.resolve();
-function rateGate(): Promise<void> {
-  const next = gateChain.then(() => sleep(MIN_REQUEST_GAP_MS));
-  // 闸门自身不能因为某次请求失败而中断后续排队
-  gateChain = next.catch(() => undefined);
-  return next;
+function makeGate(gapMs: number) {
+  let chain: Promise<void> = Promise.resolve();
+  return (): Promise<void> => {
+    const next = chain.then(() => sleep(gapMs));
+    // 闸门自身不能因为某次请求失败而中断后续排队
+    chain = next.catch(() => undefined);
+    return next;
+  };
 }
+// OKX /market/candles 配额 40 次/2s，/market/history-candles 配额 20 次/2s；
+// 分离闸门避免 tail 补拉或 /api/data 被 8640 根历史回填阻塞。
+const candlesGate = makeGate(55);
+const historyGate = makeGate(105);
 
 class OkxError extends Error {
   constructor(
@@ -33,9 +38,8 @@ class OkxError extends Error {
 
 // ─── 基础请求 ─────────────────────────────────────────────
 async function okxGet(path: string, params: Record<string, string>, timeoutMs = 5000) {
-  // 只有 K 线接口共享「20 次 / 2 秒」的 IP 配额；ticker / books 等各有独立配额，
-  // 一起排队反而白白增加首屏延时。
-  if (path.includes("candles")) await rateGate();
+  if (path.includes("history-candles")) await historyGate();
+  else if (path.includes("candles")) await candlesGate();
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const ctl = new AbortController();
@@ -125,46 +129,83 @@ export async function fetchCandlesWithMeta(
 
   if (map.size < want) {
     const oldest = Math.min(...map.keys());
-    const pages = Math.ceil((want - map.size) / 100);
+    let step = 100;
+    let startK = 0;
     const failed: number[] = [];
-    const loadPage = async (k: number) => {
-      // 第 k 页取「紧邻上一页最老一根之前」的 100 根：after 必须从 0 偏移开始，
-      // 多跳一页会在首页与历史页之间留下 100 根缺口（旧实现用的是 k * 100 * bm）。
-      const rows = await okxGetRetry("/api/v5/market/history-candles", {
-        instId: symbol,
-        bar,
-        after: String(oldest - k * 100 * bm),
-        limit: "100",
-      });
-      add(rows);
-    };
-    // 闸门已经保证全局不超过 ~9 req/s，并行只是为了让排队更紧凑；
-    // 失败页收集起来做一轮针对性重试（旧实现直接吞掉 → 直接产生缺口）。
-    await Promise.all(
-      Array.from({ length: pages }, (_, k) =>
-        loadPage(k).catch(() => {
-          failed.push(k);
-        }),
-      ),
-    );
-    if (failed.length) {
+    if (want > 1200) {
+      try {
+        const probe = await okxGetRetry("/api/v5/market/history-candles", {
+          instId: symbol,
+          bar,
+          after: String(oldest),
+          limit: "300",
+        });
+        add(probe);
+        if (probe.length >= 200) step = 300;
+        startK = 1;
+      } catch {
+        // 探测失败时退回 100 根步长，由下方重试逻辑兜底
+      }
+    }
+    if (map.size < want) {
+      const remPages = Math.ceil((want - map.size) / step);
+      const limitStr = String(step);
+      const loadPage = async (k: number) => {
+        // 第 k 页取「紧邻上一页最老一根之前」的 step 根：after 必须从 0 偏移开始，
+        // 多跳一页会在首页与历史页之间留下缺口（旧实现用的是 (k + 1) 偏移）。
+        const rows = await okxGetRetry("/api/v5/market/history-candles", {
+          instId: symbol,
+          bar,
+          after: String(oldest - k * step * bm),
+          limit: limitStr,
+        });
+        add(rows);
+      };
+      // 闸门已经保证全局限频，并行只是为了让排队更紧凑；
+      // 失败页收集起来做一轮针对性重试（旧实现直接吞掉 → 直接产生缺口）。
       await Promise.all(
-        [...new Set(failed)].map((k) =>
-          loadPage(k).catch(() => {
-            /* 仍失败则由 missingBars 如实上报 */
-          }),
-        ),
+        Array.from({ length: remPages }, (_, idx) => {
+          const k = startK + idx;
+          return loadPage(k).catch(() => {
+            failed.push(k);
+          });
+        }),
       );
+      if (failed.length) {
+        await Promise.all(
+          [...new Set(failed)].map((k) =>
+            loadPage(k).catch(() => {
+              /* 仍失败则由 missingBars 如实上报 */
+            }),
+          ),
+        );
+      }
+    }
+    // 深拉场景下若因少量历史缺根差几根未满 want，补拉最多 2 页避免误判 short
+    if (want > 1200 && map.size < want && map.size >= want - 600 && failed.length === 0) {
+      for (let extra = 0; extra < 2 && map.size < want; extra++) {
+        const curOldest = Math.min(...map.keys());
+        const rows = await okxGetRetry("/api/v5/market/history-candles", {
+          instId: symbol,
+          bar,
+          after: String(curOldest),
+          limit: String(step),
+        }).catch(() => [] as (string | number)[][]);
+        const before = map.size;
+        add(rows);
+        if (map.size === before) break;
+      }
     }
   }
 
   const sorted = [...map.values()].sort((a, b) => a.ts - b.ts);
+  const candles = sorted.slice(-want);
   let missingBars = 0;
-  for (let i = 1; i < sorted.length; i++) {
-    const step = Math.round((sorted[i].ts - sorted[i - 1].ts) / bm);
+  for (let i = 1; i < candles.length; i++) {
+    const step = Math.round((candles[i].ts - candles[i - 1].ts) / bm);
     if (step > 1) missingBars += step - 1;
   }
-  return { candles: sorted.slice(-want), missingBars, short: sorted.length < want };
+  return { candles, missingBars, short: candles.length < want };
 }
 
 /** 兼容旧签名：只要 K 线本身（缺口信息由 getCandles 负责） */
@@ -233,11 +274,26 @@ export async function fetchFundingLive(symbol: string) {
   return { fundingRate: Number(d.fundingRate), nextFundingTime: Number(d.nextFundingTime) };
 }
 
+const META_TTL = 3_600_000;
+const metaCache = new Map<string, { at: number; val: { ctVal?: number; tickSz?: number } }>();
+const metaInflight = new Map<string, Promise<{ ctVal?: number; tickSz?: number }>>();
+
 export async function fetchInstrumentMeta(symbol: string) {
-  const data = (await okxGet("/api/v5/public/instruments", { instType: "SWAP", instId: symbol })) as Record<string, string>[];
-  const d = data?.[0];
-  if (!d) return { ctVal: undefined, tickSz: undefined };
-  return { ctVal: Number(d.ctVal), tickSz: Number(d.tickSz) };
+  const hit = metaCache.get(symbol);
+  if (hit && Date.now() - hit.at < META_TTL) return hit.val;
+  const running = metaInflight.get(symbol);
+  if (running) return running;
+  const job = (async () => {
+    const data = (await okxGet("/api/v5/public/instruments", { instType: "SWAP", instId: symbol })) as Record<string, string>[];
+    const d = data?.[0];
+    const val = d ? { ctVal: Number(d.ctVal), tickSz: Number(d.tickSz) } : { ctVal: undefined, tickSz: undefined };
+    metaCache.set(symbol, { at: Date.now(), val });
+    return val;
+  })().finally(() => {
+    if (metaInflight.get(symbol) === job) metaInflight.delete(symbol);
+  });
+  metaInflight.set(symbol, job);
+  return job;
 }
 
 export async function fetchBookLive(symbol: string, levels = 10): Promise<{ bids: BookLevel[]; asks: BookLevel[] }> {
@@ -371,6 +427,8 @@ interface CacheEntry {
   want: number;
   /** 最近一次拿到"最新一根"的时间。拉取时最新一根还在形成，只有部分成交量。 */
   tailAt: number;
+  /** 最近一次尝试补拉尾部的时间（防止刚换根上游尚未生成时连续重复请求） */
+  tailAttemptAt: number;
 }
 
 // 缓存键去掉 count：一次深拉（回测 8640 根）即可服务图表 600 根、引擎面板更深的请求，
@@ -427,9 +485,12 @@ function refreshTail(key: string, entry: CacheEntry, symbol: string, bar: string
       // 补拉窗口必须和缓存首尾相接；接不上（离线太久）就放弃，交给整段重拉
       if (holesOf(merged, bm) > holesOf(entry.data, bm)) return false;
       entry.data = merged;
-      entry.tailAt = Date.now();
+      const now = Date.now();
+      entry.tailAt = now;
+      entry.tailAttemptAt = now;
       return true;
     } catch {
+      entry.tailAttemptAt = Date.now();
       return false;
     }
   })().finally(() => {
@@ -467,10 +528,10 @@ export async function getCandles(
       if (Date.now() - hit.at < ttl) {
         const last = hit.data[hit.data.length - 1];
         const bm = barMs(bar);
-        const formingAtFetch = !!last && last.ts + bm > hit.tailAt;
-        const closedSince = !!last && last.ts + bm <= Date.now();
+        const now = Date.now();
+        const needsTail = hit.live && !!last && last.ts + bm <= now && now - hit.tailAttemptAt >= 2_000;
         // 合成数据没有"残缺最新一根"的问题，只处理真实行情
-        const usable = !(hit.live && formingAtFetch && closedSince) || (await refreshTail(key, hit, symbol, bar));
+        const usable = !needsTail || (await refreshTail(key, hit, symbol, bar));
         if (usable) return { live: hit.live, gapped: hit.gapped, candles: hit.data.slice(-count) };
       }
     }
@@ -492,11 +553,13 @@ export async function getCandles(
       //  short           —— 根本没取满请求根数（上游拒绝或该合约历史确实短）
       // 只判断 missingBars 会把"请求 900 根只拿到 300 根"误判为完整（缺口检测只看窗口内部）。
       const gapped = missingBars > 0 || short;
-      remember(key, { at: Date.now(), live: true, gapped, data: candles, want: count, tailAt: Date.now() });
+      const now = Date.now();
+      remember(key, { at: now, live: true, gapped, data: candles, want: count, tailAt: now, tailAttemptAt: now });
       return { live: true, gapped, candles };
     } catch {
       const candles = synthCandles(symbol, bar, count);
-      remember(key, { at: Date.now(), live: false, gapped: false, data: candles, want: count, tailAt: Date.now() });
+      const now = Date.now();
+      remember(key, { at: now, live: false, gapped: false, data: candles, want: count, tailAt: now, tailAttemptAt: now });
       return { live: false, gapped: false, candles };
     }
   })();

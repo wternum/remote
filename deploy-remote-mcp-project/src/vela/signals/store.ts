@@ -16,7 +16,7 @@ export const SIGNAL_TYPES = [
 ] as const;
 export type SignalType = (typeof SIGNAL_TYPES)[number]['id'];
 export type SignalSource = 'price' | 'real' | 'mixed' | 'approx';
-export const SOURCE_LABELS: Record<SignalSource, string> = { price: '价格结构', real: '真实成交', mixed: '部分真实 / 代理', approx: 'K线代理' };
+
 
 export interface SignalPreferences {
   enabled: boolean;

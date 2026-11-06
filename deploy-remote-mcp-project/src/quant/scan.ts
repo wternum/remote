@@ -251,7 +251,7 @@ export function simulateOutcome(
     entryPrice = sig.entry;
     entryTs = sig.ts;
   } else {
-    if (sig.side === 'long' ? next.o <= sig.stop : next.o >= sig.stop) {
+    if (sig.side === 'long' ? next.o <= sig.stop || next.o >= sig.tp : next.o >= sig.stop || next.o <= sig.tp) {
       return {
         filled: false,
         why: 'gap',
@@ -334,8 +334,9 @@ export function candidateFrom(
   const rr = risk > 0 ? Math.abs(sig.tp - sig.entry) / risk : 0;
   const outcome = simulateWithPlan(ctx, sig, mode, maxHold, plan);
   const proba = r3(score.proba);
+  const prefix = `${sym ? `${sym}_` : ''}${bar ? `${bar}_` : ''}`;
   return {
-    id: `${mode}_${sig.ts}_${sig.pattern}_${sig.side}`,
+    id: `${prefix}${mode}_${sig.ts}_${sig.pattern}_${sig.side}`,
     idx: sig.idx,
     ts: sig.ts,
     side: sig.side,
@@ -462,7 +463,11 @@ export function simulateWithPlan(
   const risk = (entryPrice - sig.stop) * dir;
   if (!(risk > 0)) return null;
   const target = plan === 'r10' ? entryPrice + dir * risk : plan === 'r15' ? entryPrice + dir * 1.5 * risk : sig.tp;
+  if (!limit && (dir > 0 ? next.o >= target : next.o <= target)) {
+    return { filled: false, why: 'gap', entryPrice: 0, entryTs: 0, exitPrice: 0, exitTs: 0, r: 0, pnlPct: 0, holdingBars: 0, costR: 0 };
+  }
   const trigger = entryPrice + dir * risk; // 1R 触发点
+  const targetBeforeTrigger = (target - entryPrice) * dir < risk;
   const useBe = plan === 'be' || plan === 'partial';
   const half = plan === 'partial';
 
@@ -470,6 +475,7 @@ export function simulateWithPlan(
   let armed = false;
   let tookHalf = false;
   let lockedR = 0;
+  let halfCost = 0;
   let exitPrice: number | null = null;
   let exitTs = 0;
   let why: Outcome['why'] = 'time';
@@ -480,7 +486,7 @@ export function simulateWithPlan(
   for (let j = limit ? i : i + 1; j <= endJ; j++) {
     const k = cs[j];
     const hitStop = dir > 0 ? k.l <= stop : k.h >= stop;
-    const hitTrig = useBe && !armed && (dir > 0 ? k.h >= trigger : k.l <= trigger);
+    const hitTrig = useBe && !armed && !(limit && j === i) && (dir > 0 ? k.h >= trigger : k.l <= trigger);
     const hitTarget = !(limit && j === i) && (dir > 0 ? k.h >= target : k.l <= target);
 
     // 保守：同根内先算止损
@@ -491,14 +497,24 @@ export function simulateWithPlan(
       exitIdx = j;
       break;
     }
+    if (targetBeforeTrigger && hitTarget) {
+      exitPrice = target;
+      why = 'tp';
+      exitTs = k.ts;
+      exitIdx = j;
+      break;
+    }
     if (hitTrig) {
       armed = true;
       stop = entryPrice * (1 + dir * feePct * 2); // 移到成本 + 双边手续费
       if (half && !tookHalf) {
         tookHalf = true;
-        lockedR = 0.5; // 半仓在 1R 处兑现
+        const trigAdj = dir > 0 ? trigger * (1 - SLIP_RATE) : trigger * (1 + SLIP_RATE);
+        const halfGross = (trigAdj - entryPrice) * dir;
+        const halfFee = (entryPrice + trigAdj) * FEE_RATE;
+        lockedR = 0.5 * ((halfGross - halfFee) / risk);
+        halfCost = halfFee + (limit ? trigger : next.o + trigger) * SLIP_RATE;
       }
-      continue;
     }
     if (hitTarget) {
       exitPrice = target;
@@ -519,6 +535,8 @@ export function simulateWithPlan(
   const pnl = gross - fee;
   const restR = pnl / risk;
   const r = tookHalf ? lockedR + 0.5 * restR : restR;
+  const restCost = fee + (limit ? exitPrice : next.o + exitPrice) * SLIP_RATE;
+  const totalCost = tookHalf ? 0.5 * halfCost + 0.5 * restCost : restCost;
   void atr;
   return {
     filled: true,
@@ -531,8 +549,8 @@ export function simulateWithPlan(
     exitPrice: r6(exitAdj),
     exitTs,
     r: r3(r),
-    pnlPct: r3((pnl / entryPrice) * 100),
+    pnlPct: r3(tookHalf ? r * (risk / entryPrice) * 100 : (pnl / entryPrice) * 100),
     holdingBars: Math.max(1, exitIdx - i),
-    costR: r3((fee + (limit ? exitPrice : next.o + exitPrice) * SLIP_RATE) / risk),
+    costR: r3(totalCost / risk),
   };
 }

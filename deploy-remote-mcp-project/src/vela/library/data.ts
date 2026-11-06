@@ -28,13 +28,10 @@ export interface LibConcept {
   indicators: string[];
 }
 
-export const CATALOG_SOURCE = catalog.source;
-export const CATALOG_FETCHED_AT = catalog.fetchedAt;
 export const FAMILIES = catalog.families as LibFamily[];
 export const INDICATORS = catalog.indicators as LibIndicator[];
 export const CONCEPTS = catalog.concepts as LibConcept[];
 
-export const familyByKey = new Map(FAMILIES.map((family) => [family.key, family]));
 /** Chinese labels for the Library's 17 families. */
 export const FAMILY_ZH: Record<string, string> = {
   trend: '趋势',

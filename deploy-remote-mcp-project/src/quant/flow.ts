@@ -50,6 +50,9 @@ export interface FlowSnapshot {
   from: number;
   to: number;
   oiFrom: number;
+  oiTo?: number;
+  syncedPages?: number;
+  syncedOiPages?: number;
   updatedAt: number;
   complete: boolean;
   /** rubik 官方统计是否已完整回填（与 tape bootstrap 独立；失败可重试） */
@@ -347,76 +350,109 @@ async function bootstrapTape(snap: FlowSnapshot, tape: Tape, minTs: number, maxP
   snap.tape.bootstrapped = true;
 }
 
+const MAX_FLOW_BARS = 12_000;
+
+function trimFlowBars(snap: FlowSnapshot) {
+  if (snap.bars.size <= MAX_FLOW_BARS) return;
+  const keys = [...snap.bars.keys()].sort((a, b) => a - b);
+  const drop = keys.length - MAX_FLOW_BARS;
+  for (let i = 0; i < drop; i++) snap.bars.delete(keys[i]);
+  if (keys.length > drop) snap.from = Math.max(snap.from, keys[drop]);
+}
+
 // ─── rubik 官方统计（需直连或代理） ───────────────────────────
 async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPages: number, oiPages: number, signal?: AbortSignal) {
   const { instId, period } = snap;
-  let end: number | undefined;
-  for (let pages = 0; pages < maxPages; pages++) {
-    const params: Record<string, string> = { instId, period, unit: '2', limit: String(PAGE) };
-    if (end) params.end = String(end);
-    const rows = (await okxGet(base, '/api/v5/rubik/stat/taker-volume-contract', params, signal)) as string[][];
-    if (!rows.length) break;
-    let nonZero = 0;
-    let oldest = Infinity;
-    for (const r of rows) {
-      const ts = Number(r[0]);
-      const sell = Number(r[1]);
-      const buy = Number(r[2]);
-      if (!Number.isFinite(ts)) continue;
-      oldest = Math.min(oldest, ts);
-      if (!(buy > 0 || sell > 0)) continue; // 保留边界之外返回全 0，视为缺失
-      // The newest row is the still-forming bar (partial totals). Leave it to
-      // the live tape; storing it as authoritative 'rubik' would block tape
-      // aggregation and freeze an incomplete delta.
-      if (ts + snap.barMs > Date.now()) continue;
-      nonZero++;
-      const prev = snap.bars.get(ts);
-      // 刚收盘根的 rubik 统计有管线延迟，可能仍是部分成交额；此时实时 tape
-      // 已聚合得更完整（总额更高）。用总额比较而非无条件覆盖，避免把完整
-      // 的实时 delta 锁死为不完整值。OI 合并在后续循环中仍会命中 prev。
-      const tapeTotal = prev && prev.src === 'tape' ? prev.buy + prev.sell : 0;
-      if (tapeTotal > buy + sell) continue;
-      snap.bars.set(ts, { ts, buy, sell, oiContracts: prev?.oiContracts, oiUsd: prev?.oiUsd, src: 'rubik' });
-      snap.from = Math.min(snap.from, ts);
-      snap.to = Math.max(snap.to, ts);
-    }
-    if (!nonZero || !Number.isFinite(oldest) || oldest <= minTs) break;
-    end = oldest;
-    await sleep(430);
-  }
-  let oiEnd: number | undefined;
-  for (let p = 0; p < oiPages; p++) {
-    const params: Record<string, string> = { instId, period, limit: String(PAGE) };
-    if (oiEnd) params.end = String(oiEnd);
-    await sleep(430);
-    const rows = (await okxGet(base, '/api/v5/rubik/stat/contracts/open-interest-history', params, signal)) as string[][];
-    if (!rows.length) break;
-    let oldest = Infinity;
-    for (const r of rows) {
-      const ts = Number(r[0]);
-      // OKX returns [ts, oi(contracts), oiCcy, oiUsd].  Use the contract
-      // count for position-change evidence; oiUsd also moves with price.
-      const oiContracts = Number(r[1]);
-      const oiUsd = Number(r[3]);
-      if (!Number.isFinite(ts) || (!(oiContracts > 0) && !(oiUsd > 0))) continue;
-      oldest = Math.min(oldest, ts);
-      const prev = snap.bars.get(ts);
-      if (prev) {
-        prev.oiContracts = oiContracts > 0 ? oiContracts : undefined;
-        prev.oiUsd = oiUsd > 0 ? oiUsd : undefined;
-      } else {
-        snap.bars.set(ts, {
-          ts, buy: 0, sell: 0,
-          oiContracts: oiContracts > 0 ? oiContracts : undefined,
-          oiUsd: oiUsd > 0 ? oiUsd : undefined,
-          src: 'rubik',
-        });
+  // 若已按同等或更深页数完整回填过，热刷新只需补齐 snap.to 之后的新收盘根（通常 1 页）
+  const takerStopTs =
+    snap.rubikComplete && (snap.syncedPages ?? 0) >= maxPages && snap.to > 0
+      ? Math.max(minTs, snap.to - snap.barMs)
+      : minTs;
+  const oiStopTs =
+    snap.rubikComplete && (snap.syncedOiPages ?? 0) >= oiPages && (snap.oiTo ?? 0) > 0
+      ? Math.max(minTs, snap.oiTo! - snap.barMs)
+      : Math.max(minTs, snap.from);
+
+  const syncTaker = async () => {
+    let end: number | undefined;
+    for (let pages = 0; pages < maxPages; pages++) {
+      const params: Record<string, string> = { instId, period, unit: '2', limit: String(PAGE) };
+      if (end) params.end = String(end);
+      const rows = (await okxGet(base, '/api/v5/rubik/stat/taker-volume-contract', params, signal)) as string[][];
+      if (!rows.length) break;
+      let nonZero = 0;
+      let oldest = Infinity;
+      for (const r of rows) {
+        const ts = Number(r[0]);
+        const sell = Number(r[1]);
+        const buy = Number(r[2]);
+        if (!Number.isFinite(ts)) continue;
+        oldest = Math.min(oldest, ts);
+        if (!(buy > 0 || sell > 0)) continue; // 保留边界之外返回全 0，视为缺失
+        // The newest row is the still-forming bar (partial totals). Leave it to
+        // the live tape; storing it as authoritative 'rubik' would block tape
+        // aggregation and freeze an incomplete delta.
+        if (ts + snap.barMs > Date.now()) continue;
+        nonZero++;
+        const prev = snap.bars.get(ts);
+        // 刚收盘根的 rubik 统计有管线延迟，可能仍是部分成交额；此时实时 tape
+        // 已聚合得更完整（总额更高）。用总额比较而非无条件覆盖，避免把完整
+        // 的实时 delta 锁死为不完整值。OI 合并在后续循环中仍会命中 prev。
+        const tapeTotal = prev && prev.src === 'tape' ? prev.buy + prev.sell : 0;
+        if (tapeTotal > buy + sell) continue;
+        snap.bars.set(ts, { ts, buy, sell, oiContracts: prev?.oiContracts, oiUsd: prev?.oiUsd, src: 'rubik' });
+        snap.from = Math.min(snap.from, ts);
+        snap.to = Math.max(snap.to, ts);
       }
-      snap.oiFrom = Math.min(snap.oiFrom, ts);
+      if (!nonZero || !Number.isFinite(oldest) || oldest <= takerStopTs) break;
+      end = oldest;
+      if (pages + 1 < maxPages) await sleep(410);
     }
-    if (!Number.isFinite(oldest) || oldest <= Math.max(minTs, snap.from)) break;
-    oiEnd = oldest;
-  }
+    snap.syncedPages = Math.max(snap.syncedPages ?? 0, maxPages);
+  };
+
+  const syncOi = async () => {
+    let oiEnd: number | undefined;
+    for (let p = 0; p < oiPages; p++) {
+      const params: Record<string, string> = { instId, period, limit: String(PAGE) };
+      if (oiEnd) params.end = String(oiEnd);
+      const rows = (await okxGet(base, '/api/v5/rubik/stat/contracts/open-interest-history', params, signal)) as string[][];
+      if (!rows.length) break;
+      let oldest = Infinity;
+      for (const r of rows) {
+        const ts = Number(r[0]);
+        // OKX returns [ts, oi(contracts), oiCcy, oiUsd].  Use the contract
+        // count for position-change evidence; oiUsd also moves with price.
+        const oiContracts = Number(r[1]);
+        const oiUsd = Number(r[3]);
+        if (!Number.isFinite(ts) || (!(oiContracts > 0) && !(oiUsd > 0))) continue;
+        oldest = Math.min(oldest, ts);
+        const prev = snap.bars.get(ts);
+        if (prev) {
+          prev.oiContracts = oiContracts > 0 ? oiContracts : undefined;
+          prev.oiUsd = oiUsd > 0 ? oiUsd : undefined;
+        } else {
+          snap.bars.set(ts, {
+            ts, buy: 0, sell: 0,
+            oiContracts: oiContracts > 0 ? oiContracts : undefined,
+            oiUsd: oiUsd > 0 ? oiUsd : undefined,
+            src: 'rubik',
+          });
+        }
+        snap.oiFrom = Math.min(snap.oiFrom, ts);
+        snap.oiTo = Math.max(snap.oiTo ?? 0, ts);
+      }
+      const stop = oiStopTs > 0 ? oiStopTs : Math.max(minTs, snap.from);
+      if (!Number.isFinite(oldest) || oldest <= stop) break;
+      oiEnd = oldest;
+      if (p + 1 < oiPages) await sleep(410);
+    }
+    snap.syncedOiPages = Math.max(snap.syncedOiPages ?? 0, oiPages);
+  };
+
+  // taker 与 open-interest 为两个独立配额端点，并发拉取并消除尾部空等
+  await Promise.all([syncTaker(), syncOi()]);
+  trimFlowBars(snap);
 }
 
 /**
@@ -470,8 +506,10 @@ export function syncFlow(
           snap.repairedAt = Date.now();
         }
         if (!snap.tape.bootstrapped) {
-          // 回补最近 targetBars 根完整 K 线（5m 默认 8 根 ≈ 40 分钟；BTC 约 12 页 / 根）
-          const targetBars = opts.bootstrapBars ?? 8;
+          // 若 rubik 已回填历史已收盘 K 线，逐笔回补只需覆盖形成中及刚收盘的 2 根；
+          // 仅无 rubik 代理时才回补完整 targetBars 根。
+          const rawBars = opts.bootstrapBars ?? 8;
+          const targetBars = snap.rubikComplete ? Math.min(rawBars, 2) : rawBars;
           const recent = Math.floor(Date.now() / snap.barMs) * snap.barMs - targetBars * snap.barMs;
           await bootstrapTape(snap, tape, Math.max(opts.minTs, recent), opts.bootstrapPages ?? 220, opts.signal);
         }

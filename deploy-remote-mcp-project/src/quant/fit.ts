@@ -128,15 +128,7 @@ export function brier(scores: number[], y: number[]): number {
   return scores.reduce((s, p, i) => s + (p - (y[i] > 0 ? 1 : 0)) ** 2, 0) / scores.length;
 }
 
-export function logLoss(scores: number[], y: number[]): number {
-  if (!scores.length) return Math.LN2;
-  return (
-    -scores.reduce((s, p, i) => {
-      const q = Math.min(1 - 1e-9, Math.max(1e-9, p));
-      return s + (y[i] > 0 ? Math.log(q) : Math.log(1 - q));
-    }, 0) / scores.length
-  );
-}
+
 
 /** Wilson 95% 置信区间：小样本胜率的诚实误差带 */
 export function wilson(wins: number, n: number, z = 1.96): { lo: number; hi: number } {
@@ -396,7 +388,4 @@ export function fitSparse(train: Candidate[], l2 = 8): FitResult & { kept: strin
   return { ...fit, kept };
 }
 
-/** 用训练段拟合出的模型，对全样本重新打分（仅用于面板展示，不参与实时判定） */
-export function rescore(cands: Candidate[], fit: FitResult) {
-  return cands.map(c => ({ ...c, proba: Number(predict(c.evidence, fit).toFixed(3)) }));
-}
+

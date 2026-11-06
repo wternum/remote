@@ -23,7 +23,6 @@ export const styleText = (s: string) =>
 
 /** 当前图表样式（由 priceStyle:change 事件维护；工作区默认 K线） */
 let currentStyle = 'candles';
-export const readStyle = () => currentStyle;
 
 function paint(btn: HTMLButtonElement | null, label: string, kind: 'tf' | 'style') {
   if (!btn) return;

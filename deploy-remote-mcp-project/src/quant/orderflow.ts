@@ -197,19 +197,23 @@ export function readTouch(
 
   const pressure = clampR(approach.ratio * up * 4);
   const thrust = clamp01((approach.volRatio - 1.2) / 1.0) * clamp01(pressure * 1.5);
-  const e1 = clampR(-pressure - 0.6 * thrust);
+  // 仅对依赖主动买卖差的项按真实覆盖率收缩，保留客观 OHLCV 量价与影线拒绝证据
+  const e1 = clampR(-pressure - 0.6 * thrust) * approach.known;
   let e2 = 0;
-  if (inside && tVol >= 1.1 && tRatio * up <= 0.05) e2 = 0.8;
-  else if (inside && tVol < 0.9) e2 = 0.4;
-  else if (!inside && tRatio * up > 0.1 && tVol >= 1.2) e2 = -0.9;
-  else if (!inside) e2 = -0.3;
+  if (known) {
+    if (inside && tVol >= 1.1 && tRatio * up <= 0.05) e2 = 0.8;
+    else if (inside && tVol < 0.9) e2 = 0.4;
+    else if (!inside && tRatio * up > 0.1 && tVol >= 1.2) e2 = -0.9;
+    else if (!inside) e2 = -0.3;
+  } else {
+    if (inside && tVol < 0.9) e2 = 0.35;
+    else if (!inside) e2 = -0.35;
+  }
   const e3 = near ? clampR((wick - 0.3) * 2) : 0;
-  const e4 = clampR(-wide.ratio * up * 5);
-  const e5 = after ? clampR(-after.ratio * up * 4) : null;
+  const e4 = clampR(-wide.ratio * up * 5) * wide.known;
+  const e5 = after ? clampR(-after.ratio * up * 4) * after.known : null;
   const wsum = 0.3 + 0.25 + 0.12 + 0.13 + (e5 == null ? 0 : 0.2);
   let ev = (0.3 * e1 + 0.25 * e2 + 0.12 * e3 + 0.13 * e4 + (e5 == null ? 0 : 0.2 * e5)) / wsum;
-  // 覆盖率加权：接近段订单流为近似时，证据向中性收缩（满覆盖时为 no-op）。
-  ev *= approach.known;
   if (accepted) ev = Math.min(ev, -0.6);
   ev = clampR(ev * 1.6);
 
@@ -401,16 +405,22 @@ export function readSecondTest(ctx: Ctx, sig: ScanSignal): SecondTestRead {
   let cvdFirst = 0;
   let cvdSecond = 0;
   let totalVol = 0;
+  let betweenKnown = 0;
+  let betweenBars = 0;
   for (let q = l1a; q <= Math.min(n - 1, pv.second); q++) {
     if (q <= pv.first) cvdFirst += delta[q];
+    else {
+      betweenKnown += ctx.real[q];
+      betweenBars++;
+    }
     cvdSecond += delta[q];
     totalVol += vols[q];
   }
   const norm = Math.max(1e-9, totalVol * 0.08);
-  // 覆盖率加权：ctx.delta 在无真实覆盖处混入 OHLC 近似。近似值不能以满置信度
-  // 进入 CVD/背离证据——覆盖不足时按真实覆盖比例缩放（满覆盖时为 no-op）。
+  // 覆盖率加权：cvdSecond - cvdFirst 实际求和区间为 (pv.first, pv.second]，按该区间真实覆盖比例缩放
+  const cvdCov = betweenBars > 0 ? betweenKnown / betweenBars : 0;
   const flowCov = Math.min(leg1.known, leg2.known);
-  const cvdDiv = clampR((((cvdSecond - cvdFirst) * dir) / norm) * flowCov);
+  const cvdDiv = clampR((((cvdSecond - cvdFirst) * dir) / norm) * cvdCov);
   const legDeltaDiff = clampR(((leg2.ratio - leg1.ratio) * dir * 6) * flowCov);
   const v1 = leg1.vol / Math.max(1, leg1.bars);
   const v2 = leg2.vol / Math.max(1, leg2.bars);
@@ -572,7 +582,15 @@ export interface SwingLevel {
   breakIdx: number | null;
 }
 
+const swingCache = new WeakMap<Ctx, SwingLevel[]>();
+
 export function findSwingLevels(ctx: Ctx, opts: { left?: number; right?: number; priorAtr?: number; maxAge?: number } = {}): SwingLevel[] {
+  const isDefault =
+    opts.left == null && opts.right == null && opts.priorAtr == null && opts.maxAge == null;
+  if (isDefault) {
+    const hit = swingCache.get(ctx);
+    if (hit) return hit.map(l => ({ ...l }));
+  }
   const { cs, n, atr } = ctx;
   const L = opts.left ?? 8;
   const R = opts.right ?? 5;
@@ -617,6 +635,7 @@ export function findSwingLevels(ctx: Ctx, opts: { left?: number; right?: number;
       out.push(lv);
     }
   }
+  if (isDefault) swingCache.set(ctx, out.map(l => ({ ...l })));
   return out;
 }
 
@@ -957,27 +976,4 @@ export function scanBreakouts(ctx: Ctx, horizon = 48): { events: BreakoutEvent[]
   return { events, stats };
 }
 
-/** 最近 maxAge 根内发生、尚未判定失败的突破（取最新一次） */
-export function latestBreakout(ctx: Ctx, maxAge = 48): { level: SwingLevel; breakIdx: number } | null {
-  const levels = findSwingLevels(ctx);
-  let best: { level: SwingLevel; breakIdx: number } | null = null;
-  for (const lv of levels) {
-    if (lv.breakIdx == null) continue;
-    if (ctx.n - 1 - lv.breakIdx > maxAge) continue;
-    if (!best || lv.breakIdx > best.breakIdx) best = { level: lv, breakIdx: lv.breakIdx };
-  }
-  return best;
-}
 
-/** 距离最近的、仍未被突破的关键位（用于“正在接近二次测试”提示） */
-export function nearestLevel(ctx: Ctx, price: number, maxAtr = 0.6): { level: SwingLevel; distAtr: number } | null {
-  const a = Math.max(ctx.atr[ctx.n - 1] || 0, 1e-9);
-  let best: { level: SwingLevel; distAtr: number } | null = null;
-  for (const lv of findSwingLevels(ctx)) {
-    if (lv.breakIdx != null) continue;
-    if (ctx.n - 1 - lv.idx < 8) continue; // 刚形成的极值不算二次测试
-    const d = Math.abs(price - lv.price) / a;
-    if (d <= maxAtr && (!best || d < best.distAtr)) best = { level: lv, distAtr: r3(d) };
-  }
-  return best;
-}

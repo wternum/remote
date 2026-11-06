@@ -86,7 +86,26 @@ export async function GET(req: Request) {
   let to = 0;
   let lastTs = 0;
   let flow: ReturnType<typeof liveFlowOf> | undefined;
-  // 逐币种 / 逐周期拉取，避免触发 OKX 历史 K 线限频造成缺口
+  const bookBySymbol = new Map<string, Promise<number | null>>();
+  const getBookImb = (s: string) => {
+    let p = bookBySymbol.get(s);
+    if (!p) {
+      p = fetchBookLive(s, 10)
+        .then(book => bookImbalance(book.bids, book.asks))
+        .catch(() => null);
+      bookBySymbol.set(s, p);
+    }
+    return p;
+  };
+  const prepared: Array<{
+    s: string;
+    tf: string;
+    candles: ReturnType<typeof closedCandles>;
+    bookPromise: Promise<number | null>;
+    flowPromise: Promise<FlowSnapshot | null>;
+  }> = [];
+
+  // 逐币种 / 逐周期拉取 K 线（共享 candles 限速闸门），同时把独立配额的盘口与 rubik 订单流重叠在后台并发拉取
   for (const tf of timeframes) {
     for (const s of list) {
       const { live, gapped: tfGapped, candles: rawCandles } = await getCandles(s, tf, SCAN_BARS(tf));
@@ -102,49 +121,38 @@ export async function GET(req: Request) {
         to = Math.max(to, candles[candles.length - 1].ts);
         lastTs = Math.max(lastTs, candles[candles.length - 1].ts);
       }
-      // Never carry the previous symbol/timeframe's book or volume ratio into
-      // a degraded/synthetic market. Incomplete data must not feed a scan.
       flow = undefined;
-      if (!live || tfGapped) continue;
-      let bookImb: number | null = null;
-      if (live) {
-        try {
-          const book = await fetchBookLive(s, 10);
-          bookImb = bookImbalance(book.bids, book.asks);
-        } catch {
-          bookImb = null;
-        }
-        flow = liveFlowOf(candles, bookImb, null);
-      }
+      if (!live || tfGapped || !candles.length) continue;
 
-      // Node can use OKX rubik's official taker/OI history.  Bound the
-      // pagination so a panel request does not turn into an unbounded history
-      // download; uncovered older bars remain explicitly approximate.  In the
-      // browser, reuse the snapshot maintained by the signal workspace runtime instead of starting
-      // a second tape/bootstrap loop.
-      let flowSnapshot: FlowSnapshot | null = null;
-      if (live && candles.length) {
-        if (typeof window === 'undefined') {
-          try {
-            flowSnapshot = await syncFlow(s, tf, {
+      const bookPromise = getBookImb(s);
+      const flowPromise: Promise<FlowSnapshot | null> =
+        typeof window === 'undefined'
+          ? syncFlow(s, tf, {
               minTs: candles[0]?.ts ?? 0,
               maxPages: 4,
               oiPages: 2,
-            });
-          } catch {
-            flowSnapshot = null;
-          }
-        } else {
-          flowSnapshot = getFlow(s, tf) ?? null;
-        }
-      }
-      const scan = runScan(candles, tf, flow, s, plan, flowSnapshot);
+            }).catch(() => null)
+          : Promise.resolve(getFlow(s, tf) ?? null);
+      prepared.push({ s, tf, candles, bookPromise, flowPromise });
+    }
+  }
+
+  // ALL×ALL 必须整组同口径：任何一个币种/周期数据不可用，就不返回其它子集的偏置统计。
+  if (dataReady) {
+    const results = await Promise.all(
+      prepared.map(async ({ s, tf, candles, bookPromise, flowPromise }) => {
+        const [bookImb, flowSnapshot] = await Promise.all([bookPromise, flowPromise]);
+        const pairFlow = liveFlowOf(candles, bookImb, null);
+        const scan = runScan(candles, tf, pairFlow, s, plan, flowSnapshot);
+        return { pairFlow, scan };
+      }),
+    );
+    for (const { pairFlow, scan } of results) {
+      flow = pairFlow;
       confirmRows.push(...scan.confirm);
       touchRows.push(...scan.touch);
     }
-  }
-  // ALL×ALL 必须整组同口径：任何一个币种/周期数据不可用，就不返回其它子集的偏置统计。
-  if (!dataReady) {
+  } else {
     confirmRows.length = 0;
     touchRows.length = 0;
     flow = undefined;

@@ -6,7 +6,7 @@
 
 - `IndicatorBrowser.tsx` — 弹窗内容（头部搜索、三栏工作区、底栏快捷键）
 - `indicator-library.css` — 按参考站实测尺寸实现的样式（1080×680 弹窗、52px 头部、208/590/280 三栏、34px 底栏）
-- `catalog.json` / `data.ts` — 来自参考站的 801 个指标、853 个概念与 17 个分类（含中文分类名）；快照来源与抓取时间记录在 `catalog.json` 的 `source` / `fetchedAt` 字段（`https://app.luxalgo.com/api/library/indicators/query?fields=card&sort=name&pageIndex=0&pageQuantity=1000`，2026-10-08），`data.ts` 以 `CATALOG_SOURCE` / `CATALOG_FETCHED_AT` 导出，运行时不实时请求该接口
+- `catalog.json` / `data.ts` — 来自参考站的 801 个指标、853 个概念与 17 个分类（含中文分类名）；快照来源与抓取时间记录在 `catalog.json` 的 `source` / `fetchedAt` 字段（`https://app.luxalgo.com/api/library/indicators/query?fields=card&sort=name&pageIndex=0&pageQuantity=1000`，2026-10-08），来源与抓取时间只保留在 `catalog.json` 内（`data.ts` 不再重复导出），运行时不实时请求该接口
 - `../IndicatorPickerDialog.tsx` — 顶栏「指标」按钮宿主
 
 ## 行为

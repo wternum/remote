@@ -11,6 +11,17 @@ import { EMPTY_RUNTIME, flowRequested, emptyCounts, emptySignalPayload, type Sig
 type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: AnnPayload) => void } };
 const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, historyShort: false, lastPrice: 0 });
 
+/**
+ * 图表标记已整体下线：画布不再接收 payload，侧栏也只显示行情行与开关。
+ * 此时 analyzeSignals + projectSignals 的产物没有任何消费者，实测 1500 根约
+ * 11.85ms/次（心跳口径 ~0.8%、节流上限 ~4% 单核持续空转），因此跳过整段计算。
+ * 恢复标记时把此开关改回 true 即可，检测/排版模块与单测均原样保留。
+ *
+ * 注意：订单流同步（requestFlow）不受此开关影响——浏览器端入场确认引擎
+ * 通过 src/api/engine.ts 的 getFlow() 读取这份缓存，停掉会连带削弱该面板。
+ */
+const MARKERS_ENABLED = false;
+
 /** The runtime belongs to the workspace, never the panel. Closing the sidebar leaves it alive. */
 export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () => void {
   let alive = true;
@@ -59,8 +70,11 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     } catch { return []; }
   };
   const paint = () => {
-    const projected = projectSignals(analysis, preferences, focusId);
-    if (preferences.enabled) projected.payload.obstacles = obstacles();
+    const projected = MARKERS_ENABLED
+      ? projectSignals(analysis, preferences, focusId)
+      : { payload: emptySignalPayload(), visible: [], counts: emptyCounts() };
+    // 标记下线期间恒下发空 payload；write() 内部按指纹去重，只有首次真正触达图层。
+    if (MARKERS_ENABLED && preferences.enabled) projected.payload.obstacles = obstacles();
     write(projected.payload);
     const period = flowPeriodOf(timeframe);
     const snap = period ? getFlow(symbol, period) : undefined;
@@ -169,15 +183,19 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     });
     if (key !== candleKey || needsScan) {
       candleKey = key; needsScan = false;
-      const candles: Candle[] = raw.map(b => ({ ts: b.time, o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume ?? 0 }));
-      const period = flowPeriodOf(timeframe);
-      try {
-        analysis = analyzeSignals(candles, barMs, preferences, period ? getFlow(symbol, period) : null);
-        lastScanAt = Date.now();
-      } catch (e) {
-        analysis = blankAnalysis();
-        loadError = '标注计算暂不可用；图表与手动画线不受影响。';
-        console.warn('[信号标注]', e);
+      if (MARKERS_ENABLED) {
+        const candles: Candle[] = raw.map(b => ({ ts: b.time, o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume ?? 0 }));
+        const period = flowPeriodOf(timeframe);
+        try {
+          analysis = analyzeSignals(candles, barMs, preferences, period ? getFlow(symbol, period) : null);
+          lastScanAt = Date.now();
+        } catch (e) {
+          analysis = blankAnalysis();
+          loadError = '标注计算暂不可用；图表与手动画线不受影响。';
+          console.warn('[信号标注]', e);
+        }
+      } else {
+        analysis = blankAnalysis(preferences.lookback);
       }
     }
     requestFlow();

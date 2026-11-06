@@ -208,15 +208,4 @@ export function buildIndicatorCatalog(
   });
 }
 
-export const FEATURED_ORDER = [
-  "bollinger-bands",
-  "supertrend",
-  "pulse.double",
-  "ema",
-  "rsi",
-  "vpvr",
-  "macd",
-  "volume",
-  "sma",
-  "vwap",
-];
+

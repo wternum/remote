@@ -20,6 +20,7 @@ import {
   type DoubleParams,
 } from '../../remote/setup-mcp-project-locally/src/lib/engine';
 import { buildContext, candidateFrom, type LiveFlow } from '@/quant/scan';
+import type { FlowSnapshot } from '@/quant/flow';
 import { FACTORS, gradeMeta } from '@/quant/model';
 import { getConfig, type EntryMode } from '@/quant/config';
 import { closedCandles } from '@/lib/candles';
@@ -77,7 +78,8 @@ export function simulate(
   opts: EngineBacktestOptions,
   p: DoubleParams = DEFAULT_PARAMS,
   confMin = CONF_MIN,
- ): TradedSignal[] {
+  flow?: FlowSnapshot | null,
+): TradedSignal[] {
   // The remote/browser backtest route can still pass OKX's forming candle.
   // Normalize here as well as at the HTTP boundary so every caller shares the
   // same closed-bar contract.
@@ -87,7 +89,7 @@ export function simulate(
   const baseThreshold = opts.threshold ?? cfg.threshold;
   const replaceConf = opts.replaceConfFilter ?? cfg.replaceConfFilter;
   const threshold = opts.flowFilter ? Math.min(0.9, baseThreshold + 0.05) : baseThreshold;
-  const ctx = buildContext(cs);
+  const ctx = buildContext(cs, flow);
   const maxHold = maxHoldOf(bar);
   const { signals } = scanDoubles(cs, paramsFor(mode, p));
   const recs: TradedSignal[] = [];

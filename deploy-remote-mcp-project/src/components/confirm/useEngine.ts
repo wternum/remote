@@ -72,7 +72,8 @@ export function readActiveMarket(): { symbol: string; bar: string } {
     const ticker = (market?.symbol ?? '').replace(/^okx:/i, '');
     if (/^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker)) {
       out.symbol = ticker;
-      out.bar = Number(market?.timeframe) >= 15 ? '15m' : '5m';
+      const tf = market?.timeframe ?? '';
+      out.bar = tf === 'D' || tf === 'W' || tf === 'M' || Number(tf) >= 15 ? '15m' : '5m';
       return out;
     }
   } catch {
@@ -139,6 +140,7 @@ export function useEngine(open: boolean) {
         if (data.dataReady === false) setError(data.dataIssue ?? '行情数据不完整，本次未生成扫描统计。');
       } catch (e) {
         if (controller.signal.aborted || seq !== seqRef.current) return;
+        setPayload(null);
         setError(e instanceof Error ? e.message : String(e));
       } finally {
         if (seq === seqRef.current) setLoading(false);

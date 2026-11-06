@@ -18,7 +18,10 @@ function mergeTail(base: Candle[], tail: Candle[]): Candle[] {
   if (!tail.length) return base;
   const m = new Map<number, Candle>();
   for (const c of base) m.set(c.ts, c);
-  for (const c of tail) m.set(c.ts, c);
+  for (const c of tail) {
+    const prev = m.get(c.ts);
+    m.set(c.ts, !prev || c.v >= prev.v ? c : prev);
+  }
   const out = [...m.values()].sort((a, b) => a.ts - b.ts);
   return out.slice(-Math.max(base.length, 1));
 }

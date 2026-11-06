@@ -267,7 +267,4 @@ export function gradeMeta(grade: Grade) {
   return GRADE_BANDS.find(b => b.grade === grade) ?? GRADE_BANDS[GRADE_BANDS.length - 1];
 }
 
-/** 概率 × 赔率的期望值（R），用于把“胜率”与“盈亏比”放到同一张桌子上 */
-export function expectancy(r: number, p: number) {
-  return p * Math.max(r, 0) - (1 - p) * 1;
-}
+
