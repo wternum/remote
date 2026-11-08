@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 //  双顶 / 双底「入场确认」模型
 //  · 不再“看见形态就下单”：每个候选必须先通过订单流 + 结构 + 风险三组证据验证
-//  · 每个因子给出 [-1, 1] 的证据强度，加权求和后过 logistic 得到成功概率
+//  · 每个因子给出 [-1, 1] 的证据强度，加权求和后过 logistic 得到模型分数（未经独立校准，不是真实胜率）
 //  · 缺数据（如回测没有实时盘口）时该因子贡献为 0，不做臆测加成
 // ─────────────────────────────────────────────────────────────
 
@@ -68,11 +68,11 @@ export const FACTORS: FactorDef[] = [
   },
   {
     key: 'absorption',
-    label: '关键位吸收',
+    label: '关键位吸收候选',
     short: 'ABSORB',
     group: '订单流',
     weight: 0.8,
-    hint: '测试窗口内出现“放量刺破关键位但收盘收回”的K线（被动限价吃掉主动市价）越多，支撑/阻力越可信；收盘停在关键位外侧则视为击穿。',
+    hint: '测试窗口内出现“放量刺破关键位但收盘收回”的K线（价格结果未跟随主动推进）越多，越支持承接候选；不证明被动订单身份；收盘停在关键位外侧则视为击穿。',
   },
   {
     key: 'wickReject',
@@ -107,7 +107,7 @@ export const FACTORS: FactorDef[] = [
     group: '订单流',
     weight: 0.4,
     liveOnly: true,
-    hint: '成交流中大单的名义金额偏向。与交易方向一致代表聪明钱在推；反向通常意味着还在寻找流动性。仅实时可用。',
+    hint: '成交流中大单的名义金额偏向。与交易方向一致仅表示大单主动方向；不证明机构身份或意图。仅实时可用。',
   },
   {
     key: 'levelIntegrity',
@@ -115,7 +115,7 @@ export const FACTORS: FactorDef[] = [
     short: 'LEVEL',
     group: '结构',
     weight: 0.4,
-    hint: '同一价位被测试次数越多、期间是否出现过“收盘击穿”，决定这条线还剩多少防守价值；刺破后快速收回（扫损回收）额外加分。',
+    hint: '同一价位被测试次数越多、期间是否出现过“收盘击穿”，决定这条线还剩多少防守价值；刺破后快速收回（扫位收回）额外加分。',
   },
   {
     key: 'patternHeight',
@@ -176,11 +176,11 @@ export const FACTORS: FactorDef[] = [
   },
   {
     key: 'sweepTrap',
-    label: '扫损陷阱',
+    label: '扫位陷阱候选',
     short: 'TRAP',
     group: '订单流',
     weight: 0.65,
-    hint: '诱多 / 诱空判定：价格刺穿前高/前低（触发突破单与止损）后收回，且刺穿期间主动成交站在反转一侧或追单放量被吸收 → 被套的突破盘成为反向燃料。收盘停在关键位外侧且突破方向主动成交占优则为真突破，记负分。',
+    hint: '诱多 / 诱空候选：价格刺穿前高/前低后收回，且刺穿期间主动成交站在反转一侧或追单放量被吸收 → 突破追随者可能处于不利位置（解释模型，非账户事实）。收盘停在关键位外侧且突破方向主动成交占优则为真突破，记负分。',
   },
   {
     key: 'testDelta',
@@ -192,11 +192,11 @@ export const FACTORS: FactorDef[] = [
   },
   {
     key: 'oiTrap',
-    label: '持仓被套',
+    label: '持仓量变化',
     short: 'OI',
     group: '订单流',
     weight: 0.3,
-    hint: '第二腿（冲向二顶 / 杀向二底）期间永续持仓量的变化：持仓增加说明有新仓追进极值区，一旦形态成立这些仓位成为反向推力；持仓减少则是平仓驱动的冲刺，反转后缺少燃料。仅在有持仓量数据时参与评分。',
+    hint: '第二腿（冲向二顶 / 杀向二底）期间永续持仓量的变化：持仓增加说明总持仓扩张，但不能识别多空身份或谁被套；持仓减少则是平仓驱动的冲刺，反转后缺少燃料。仅在有持仓量数据时参与评分。',
   },
 ];
 
@@ -218,7 +218,7 @@ export function sigmoid(x: number): number {
 }
 
 export interface Score {
-  /** 入场成功概率 0..1 */
+  /** 模型映射分数 0..1；未经独立样本外校准，不是真实胜率 */
   proba: number;
   logit: number;
   /** 与 FACTORS 对齐；null = 该场景无数据 */
@@ -252,10 +252,10 @@ export function scoreEvidence(evidence: (number | null)[]): Score {
 export type Grade = 'A' | 'B' | 'C' | 'D';
 
 export const GRADE_BANDS: { grade: Grade; min: number; label: string; color: string }[] = [
-  { grade: 'A', min: 0.66, label: '强确认 · 默认执行档', color: '#2ebd85' },
-  { grade: 'B', min: 0.58, label: '有效确认 · 标准执行', color: '#37c8dd' },
-  { grade: 'C', min: 0.5, label: '边缘确认 · 降仓或等待', color: '#f0b90b' },
-  { grade: 'D', min: 0, label: '确认不足 · 放弃', color: '#f6465d' },
+  { grade: 'A', min: 0.66, label: '高模型分 · 待验证', color: '#2ebd85' },
+  { grade: 'B', min: 0.58, label: '中模型分 · 待验证', color: '#37c8dd' },
+  { grade: 'C', min: 0.5, label: '边缘分数 · 观察', color: '#f0b90b' },
+  { grade: 'D', min: 0, label: '低模型分 · 不采纳', color: '#f6465d' },
 ];
 
 export function gradeOf(proba: number): Grade {

@@ -128,6 +128,18 @@ const migrations = `
     at timestamptz DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS runs_symbol ON backtest_runs (symbol, at);
+  CREATE TABLE IF NOT EXISTS price_action_audits (
+    id text PRIMARY KEY,
+    symbol text NOT NULL,
+    bar text NOT NULL,
+    from_ts bigint NOT NULL,
+    to_ts bigint NOT NULL,
+    bar_count integer NOT NULL,
+    rules text NOT NULL,
+    report jsonb NOT NULL,
+    created_at timestamptz DEFAULT now() NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS pa_audits_market_time ON price_action_audits (symbol, bar, created_at);
 `;
 
 export function initializeDatabase(): Promise<void> {

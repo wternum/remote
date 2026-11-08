@@ -578,7 +578,9 @@ export function bigBiasOf(
  * 逐笔回补允许少量网络缺口，但不接受超过整根 K 线总额的错单位/重复数据。
  * 无有效 K 线成交额时无法证明覆盖，不能把缺失当作完整。
  */
-export function hasRealFlow(bar: FlowBar | undefined, candleVol?: number): bar is FlowBar {
+export function hasRealFlow(bar: FlowBar | undefined, candleVol?: number, volumeSource?: import('@/lib/types').VolumeSource): bar is FlowBar {
+  // Close×quantity estimates cannot validate tape coverage or CVD continuity.
+  if (volumeSource && volumeSource !== 'quote') return false;
   if (!bar || !Number.isFinite(bar.buy) || !Number.isFinite(bar.sell) ||
       bar.buy < 0 || bar.sell < 0 || !(bar.buy + bar.sell > 0) ||
       candleVol == null || !Number.isFinite(candleVol) || !(candleVol > 0)) return false;

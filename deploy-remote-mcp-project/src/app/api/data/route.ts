@@ -10,20 +10,15 @@ import {
 } from "@/server/okx";
 import { ctValOf, type Candle } from "@/lib/types";
 import { DATA_BARS, badRequest, parseBar, parseSymbol } from "@/lib/market";
+import { mergeCandles } from "@/lib/okxCandles";
+import { barMs } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 // 用最新的尾部 K 线覆盖缓存（缓存最长 120s，必须补齐，避免与 WebSocket 实时 K 线之间出现缺口）
-function mergeTail(base: Candle[], tail: Candle[]): Candle[] {
+function mergeTail(base: Candle[], tail: Candle[], bar: string): Candle[] {
   if (!tail.length) return base;
-  const m = new Map<number, Candle>();
-  for (const c of base) m.set(c.ts, c);
-  for (const c of tail) {
-    const prev = m.get(c.ts);
-    m.set(c.ts, !prev || c.v >= prev.v ? c : prev);
-  }
-  const out = [...m.values()].sort((a, b) => a.ts - b.ts);
-  return out.slice(-Math.max(base.length, 1));
+  return mergeCandles(base, tail, barMs(bar)).slice(-Math.max(base.length, 1));
 }
 
 export async function GET(req: Request) {
@@ -65,16 +60,15 @@ export async function GET(req: Request) {
       fetchFundingLive(symbol).catch(() => ({ fundingRate: undefined, nextFundingTime: undefined })),
       fetchInstrumentMeta(symbol).catch(() => ({ ctVal: undefined, tickSz: undefined })),
     ]);
-    candles = mergeTail(cached, tail);
+    candles = mergeTail(cached, tail, bar);
     ticker = tk ?? synthTicker(candles, bar);
-    book = bk && bk.bids.length && bk.asks.length ? bk : synthBook(ticker.last);
+    const realBook = !!(bk && bk.bids.length && bk.asks.length);
+    book = realBook ? bk! : synthBook(ticker.last);
     fundingRate = fr.fundingRate;
     nextFundingTime = fr.nextFundingTime;
     if (meta.ctVal && Number.isFinite(meta.ctVal)) ctVal = meta.ctVal;
-    // 标记价格：盘口中间价（永续结算参考）
-    if (book.bids.length && book.asks.length) {
-      markPx = (book.bids[0].p + book.asks[0].p) / 2;
-    }
+    // A synthetic fallback book must never be labelled as an exchange mark/mid price.
+    if (realBook) markPx = (book.bids[0].p + book.asks[0].p) / 2;
   } else {
     ticker = synthTicker(candles, bar);
     book = synthBook(ticker.last);
@@ -82,6 +76,8 @@ export async function GET(req: Request) {
 
   return Response.json({
     live,
+    source: live ? 'okx' : 'synthetic',
+    bookSource: book && live && markPx != null ? 'okx' : 'synthetic',
     // 上游返回的 K 线不连续时显式告知调用方，避免把缺口当成真实行情
     gapped,
     symbol,

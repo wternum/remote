@@ -1,10 +1,15 @@
+export type VolumeSource = 'quote' | 'base_close_estimate' | 'contracts_close_estimate' | 'synthetic';
 export interface Candle {
   ts: number;
   o: number;
   h: number;
   c: number;
   l: number;
+  /** Quote-currency turnover; consult volumeSource before using it as exact volume. */
   v: number;
+  volumeSource?: VolumeSource;
+  /** OKX: 1 completed, 0 forming; absent only for legacy fixtures/offline samples. */
+  confirm?: 0 | 1;
 }
 
 export type Side = "long" | "short";

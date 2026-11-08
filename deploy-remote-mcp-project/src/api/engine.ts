@@ -1,4 +1,4 @@
-import { getCandles, fetchBookLive } from '@/server/okx';
+import { getCandles } from '@/server/okx';
 import { SYMBOLS } from '@/lib/types';
 import { runScan, SCAN_BARS, liveFlowOf, EXIT_PLANS, type Candidate, type ExitPlan } from '@/quant/scan';
 import { FACTORS, MODEL } from '@/quant/model';
@@ -86,22 +86,10 @@ export async function GET(req: Request) {
   let to = 0;
   let lastTs = 0;
   let flow: ReturnType<typeof liveFlowOf> | undefined;
-  const bookBySymbol = new Map<string, Promise<number | null>>();
-  const getBookImb = (s: string) => {
-    let p = bookBySymbol.get(s);
-    if (!p) {
-      p = fetchBookLive(s, 10)
-        .then(book => bookImbalance(book.bids, book.asks))
-        .catch(() => null);
-      bookBySymbol.set(s, p);
-    }
-    return p;
-  };
   const prepared: Array<{
     s: string;
     tf: string;
     candles: ReturnType<typeof closedCandles>;
-    bookPromise: Promise<number | null>;
     flowPromise: Promise<FlowSnapshot | null>;
   }> = [];
 
@@ -124,7 +112,6 @@ export async function GET(req: Request) {
       flow = undefined;
       if (!live || tfGapped || !candles.length) continue;
 
-      const bookPromise = getBookImb(s);
       const flowPromise: Promise<FlowSnapshot | null> =
         typeof window === 'undefined'
           ? syncFlow(s, tf, {
@@ -133,16 +120,17 @@ export async function GET(req: Request) {
               oiPages: 2,
             }).catch(() => null)
           : Promise.resolve(getFlow(s, tf) ?? null);
-      prepared.push({ s, tf, candles, bookPromise, flowPromise });
+      prepared.push({ s, tf, candles, flowPromise });
     }
   }
 
   // ALL×ALL 必须整组同口径：任何一个币种/周期数据不可用，就不返回其它子集的偏置统计。
   if (dataReady) {
     const results = await Promise.all(
-      prepared.map(async ({ s, tf, candles, bookPromise, flowPromise }) => {
-        const [bookImb, flowSnapshot] = await Promise.all([bookPromise, flowPromise]);
-        const pairFlow = liveFlowOf(candles, bookImb, null);
+      prepared.map(async ({ s, tf, candles, flowPromise }) => {
+        const flowSnapshot = await flowPromise;
+        // A request-time book snapshot is NOT bar-time evidence for a closed signal.
+        const pairFlow = liveFlowOf(candles, null, null);
         const scan = runScan(candles, tf, pairFlow, s, plan, flowSnapshot);
         return { pairFlow, scan };
       }),
@@ -192,6 +180,7 @@ export async function GET(req: Request) {
       liveOnly: !!f.liveOnly,
     })),
     model: MODEL,
+    executionProtocol: { confirm: 'next-bar-open-market', touch: 'limit-at-key-within-signal-bar', score: 'uncalibrated-logistic-map' },
     config: cfg,
     exitPlan: plan,
     exitPlans: EXIT_PLANS,

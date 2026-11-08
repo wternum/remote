@@ -1,5 +1,6 @@
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, SymbolInfo } from '@luxalgo/vela';
-import { quoteVolumeFromRow } from '@/lib/okxVolume';
+import { parseOkxCandle, preferCandle } from '@/lib/okxCandles';
+import type { Candle, VolumeSource } from '@/lib/types';
 
 // ─────────────────────────────────────────────────────────────
 //  OKX 永续 DataProvider：历史分页 REST + 公共 WebSocket 实时 K 线
@@ -69,11 +70,11 @@ const brandIcon = (base: string) => {
 
 const TICK: Record<string, number> = { BTC: 0.1, ETH: 0.01, SOL: 0.01 };
 
-function parseRow(r: (string | number)[], symbol: string): OHLCV | null {
-  if (!Array.isArray(r) || r.length < 6) return null;
-  const [t, o, h, l, c] = r.map(Number);
-  if (![t, o, h, l, c].every(Number.isFinite) || !(h >= Math.max(o, c) && l <= Math.min(o, c))) return null;
-  return { time: t, open: o, high: h, low: l, close: c, volume: quoteVolumeFromRow(r, symbol) };
+type MarketBar = OHLCV & { confirm?: 0 | 1; volumeSource?: VolumeSource };
+function parseRow(r: (string | number)[], symbol: string): MarketBar | null {
+  const c = parseOkxCandle(r, symbol);
+  if (!c) return null;
+  return { time: c.ts, open: c.o, high: c.h, low: c.l, close: c.c, volume: c.v, confirm: c.confirm, volumeSource: c.volumeSource };
 }
 
 async function okxGet(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<(string | number)[][]> {
@@ -114,9 +115,8 @@ const MAX_STORE_BARS = 12_000;
  * 一根 K 线内的累计成交额只增不减（实测 OKX 推送 35 次 0 次回退），因此成交额
  * 更大者必然更新；相等时取后到者，以接收价格修正。
  */
-function newer(existing: OHLCV | undefined, incoming: OHLCV): OHLCV {
-  if (!existing) return incoming;
-  return (incoming.volume ?? 0) >= (existing.volume ?? 0) ? incoming : existing;
+function newer(existing: MarketBar | undefined, incoming: MarketBar): MarketBar {
+  return preferCandle(existing, incoming, existing?.volume ?? 0, incoming.volume ?? 0);
 }
 
 function mergeFull(key: string, cur: OHLCV[], incoming: OHLCV[]) {

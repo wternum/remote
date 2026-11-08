@@ -1,10 +1,12 @@
 # 双顶 / 双底统一标注
 
-当前主线：**一个 M/W 结构、一条可展开判读、一个阶段出口**。所有内容来自已加载的真实价格/成交数据或明确标识的价格事实；不下单、不输出校准胜率，不推断真实止损或参与者身份。
+> **当前运行状态（2026-11 审计）**：`runtime.ts` 的 `MARKERS_ENABLED=false`，主图 M/W 画布标记下线；当前右侧侧栏为时段调度台，未挂载完整 M/W 详情列表。本文保留统一标注的设计与实现说明，不代表这些标记当前默认显示。指标分工与三种入场协议见 [双顶双底指标研究](../../../docs/DOUBLE-TOP-BOTTOM-INDICATORS.md)。
 
-## 1. 用户看到什么
+设计主线：**一个 M/W 结构、一条可展开判读、一个阶段出口**。所有内容来自已加载的真实价格/成交数据或明确标识的价格事实；不下单、不输出校准胜率，不推断真实止损或参与者身份。
 
-右侧「信号标注」默认打开「双顶双底」页签。
+## 1. 设计目标：用户看到什么（当前未默认挂载）
+
+设计中的右侧「信号标注」打开「双顶双底」页签；当前运行状态见顶部审计说明。
 
 - 「正在跟踪」显示仍在观察的形态；「含历史」保留已结束记录。
 - 点击一条记录展开完整证据并定位图表；点时间线可以定位到具体事件。
@@ -40,7 +42,7 @@ OKXProvider → barsHub
   → annotLayer.ts（专用Canvas）+ SignalPanel / MwStoryDetails（完整详情）
 ```
 
-`keyLevelCall.ts` 及其独立评分/阶段出口已删除。`scenario.ts` 不再组装 UI 或生成第二套结论，`analyzeMwPhase`、`analyzeKeyLevelScenario`、`selectScenarios`、`rankScenarioReads` 已移除。阶段/方向只由 `analyzeMwStory` 产生，价格生命周期由 `evaluateLine` 提供。
+`keyLevelCall.ts` 文件仍存在，但当前主线未引用其独立评分/阶段出口；`scenario.ts` 不再组装 UI 或生成第二套结论，`analyzeMwPhase`、`analyzeKeyLevelScenario`、`selectScenarios`、`rankScenarioReads` 已移除。阶段/方向只由 `analyzeMwStory` 产生，价格生命周期由 `evaluateLine` 提供。
 
 ## 3. 形态与归并
 

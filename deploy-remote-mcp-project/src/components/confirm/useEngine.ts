@@ -102,7 +102,7 @@ export function useEngine(open: boolean) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cfg, setCfg] = useState<EngineConfig>(() => getConfig());
-  // 默认「1R 减半 + 保本」：对照实验中它的胜率与净 R 均优于原颈线目标
+  // 默认「1R 减半 + 保本」：仅为可选管理方案，需按当前样本重新验证
   const [exitPlan, setExitPlan] = useState<ExitPlan>('partial');
   const requested = useRef('');
   const abortRef = useRef<AbortController | null>(null);

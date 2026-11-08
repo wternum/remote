@@ -1,6 +1,6 @@
 import { Candle, BookLevel } from "@/lib/types";
 import { barMs, ctValOf } from "@/lib/types";
-import { quoteVolumeFromRow } from "@/lib/okxVolume";
+import { parseOkxCandle, mergeCandles } from "@/lib/okxCandles";
 
 const BASE = "https://www.okx.com";
 
@@ -77,15 +77,7 @@ async function okxGetRetry(
 
 // 防御性解析：官方格式 [ts,o,h,l,c,vol,volCcy,volCcyQuote,(confirm)]
 function parseCandleRow(row: (string | number)[], symbol: string): Candle | null {
-  if (!Array.isArray(row) || row.length < 6) return null;
-  const ts = Number(row[0]);
-  const o = Number(row[1]);
-  const h = Number(row[2]);
-  const l = Number(row[3]);
-  const c = Number(row[4]);
-  if (![ts, o, h, l, c].every(Number.isFinite)) return null;
-  if (!(h >= Math.max(o, c) - 1e-9 && l <= Math.min(o, c) + 1e-9)) return null;
-  return { ts, o, h, l, c, v: quoteVolumeFromRow(row, symbol) };
+  return parseOkxCandle(row, symbol);
 }
 
 // ─── 实时拉取 ─────────────────────────────────────────────
@@ -286,8 +278,10 @@ export async function fetchInstrumentMeta(symbol: string) {
   const job = (async () => {
     const data = (await okxGet("/api/v5/public/instruments", { instType: "SWAP", instId: symbol })) as Record<string, string>[];
     const d = data?.[0];
-    const val = d ? { ctVal: Number(d.ctVal), tickSz: Number(d.tickSz) } : { ctVal: undefined, tickSz: undefined };
-    metaCache.set(symbol, { at: Date.now(), val });
+    const ctVal = Number(d?.ctVal), tickSz = Number(d?.tickSz);
+    const val = { ctVal: Number.isFinite(ctVal) && ctVal > 0 ? ctVal : undefined, tickSz: Number.isFinite(tickSz) && tickSz > 0 ? tickSz : undefined };
+    // Do not cache an empty/malformed instrument response for an hour.
+    if (val.ctVal && val.tickSz && d?.state === 'live') metaCache.set(symbol, { at: Date.now(), val });
     return val;
   })().finally(() => {
     if (metaInflight.get(symbol) === job) metaInflight.delete(symbol);
@@ -375,7 +369,7 @@ export function synthCandles(symbol: string, bar: string, count: number, endTs?:
     // 仿真成交量按"张"生成，再折算为 USDT 成交额，保持与真实数据同口径
     // 张数 × 面值 = 币数，× 价格 = USDT 成交额（旧实现漏乘面值：BTC 偏大 100 倍、ETH 10 倍）
     const v = cfg.volUnit * ctValOf(symbol) * (0.45 + rng() * 0.8) * (1 + bodyPct / cfg.vol / 2.2) * c;
-    out.push({ ts: start + i * bm, o, h: hi, l: lo, c, v });
+    out.push({ ts: start + i * bm, o, h: hi, l: lo, c, v, volumeSource: 'synthetic' });
     price = c;
   }
   return out;
@@ -443,14 +437,8 @@ const inflight = new Map<string, { promise: Promise<CandleSet>; count: number }>
 const tailRefresh = new Map<string, Promise<boolean>>();
 
 /** 两份 K 线按时间戳合并，同一根取成交额更大者（一根 K 线内成交额只增不减）。 */
-function mergeByTs(base: Candle[], incoming: Candle[]): Candle[] {
-  const map = new Map<number, Candle>();
-  for (const c of base) map.set(c.ts, c);
-  for (const c of incoming) {
-    const prev = map.get(c.ts);
-    map.set(c.ts, !prev || c.v >= prev.v ? c : prev);
-  }
-  return [...map.values()].sort((a, b) => a.ts - b.ts);
+function mergeByTs(base: Candle[], incoming: Candle[], intervalMs: number): Candle[] {
+  return mergeCandles(base, incoming, intervalMs);
 }
 
 function holesOf(cs: Candle[], bm: number): number {
@@ -481,7 +469,7 @@ function refreshTail(key: string, entry: CacheEntry, symbol: string, bar: string
       }
       if (!fresh.length) return false;
       const bm = barMs(bar);
-      const merged = mergeByTs(entry.data, fresh).slice(-Math.max(entry.data.length, 1));
+      const merged = mergeByTs(entry.data, fresh, bm).slice(-Math.max(entry.data.length, 1));
       // 补拉窗口必须和缓存首尾相接；接不上（离线太久）就放弃，交给整段重拉
       if (holesOf(merged, bm) > holesOf(entry.data, bm)) return false;
       entry.data = merged;

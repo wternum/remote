@@ -5,6 +5,7 @@ import SignalPanel from './signals/SignalPanel';
 import { mountSignalRuntime } from './signals/runtime';
 import { SIGNAL_PANEL_ID, signalStoreFor } from './signals/store';
 import './signals/signals.css';
+import './signals/sessionDesk.css';
 
 let registered = false;
 export function registerSignalPanel() {

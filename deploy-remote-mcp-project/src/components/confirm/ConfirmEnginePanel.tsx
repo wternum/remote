@@ -650,7 +650,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                       {!stats.edge.enough
                         ? '样本量不足，暂无法判定门槛是否有效'
                         : stats.edge.better
-                          ? `当前门槛有效：期望值 ${signed(stats.edge.dEv)}R/笔、胜率 ${signed(stats.edge.dWin, 1)}pp`
+                          ? `当前样本中门槛组期望较高： ${signed(stats.edge.dEv)}R/笔、胜率 ${signed(stats.edge.dWin, 1)}pp`
                           : stats.edge.worse
                             ? `当前门槛没有带来提升：期望值 ${signed(stats.edge.dEv)}R/笔`
                             : '当前门槛与不设门槛基本持平'}
@@ -668,7 +668,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                 title="配置寻优 · 入场 × 出场 × 门槛"
                 sub={
                   stats?.optimize?.combos.length
-                    ? `网格搜索后按样本外表现排序：前 ${stats.optimize.totalIs} 笔观察 / 后 ${stats.optimize.totalOos} 笔检验，通过双重检验 ${stats.optimize.validated} 组`
+                    ? `网格搜索后按样本外表现排序：前 ${stats.optimize.totalIs} 笔观察 / 后 ${stats.optimize.totalOos} 笔检验，初筛同向 ${stats.optimize.validated} 组（待独立复核）`
                     : '样本不足，无法做配置寻优'
                 }
                 icon={<Wand2 size={13} />}
@@ -677,9 +677,9 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                     <button
                       onClick={() => eng.applyCombo(stats.optimize.best!)}
                       className="rounded-md border border-[#37c8dd]/45 bg-[#37c8dd]/12 px-2 py-1 text-[10px] font-semibold text-[#37c8dd] transition-all hover:bg-[#37c8dd]/20 active:scale-95"
-                      title="优先应用通过样本外双重检验的组合，并同步门槛、入场方式与出场方案"
+                      title="应用当前样本排名第一的候选组合；不是独立验证结论"
                     >
-                      应用最优组合
+                      应用候选组合
                     </button>
                   ) : null
                 }
@@ -724,13 +724,13 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
                             <span style={{ color: c.oos.avgR >= 0 ? LONG : SHORT }}>{signed(c.oos.avgR)}R</span>
                           </span>
                           <span className="text-right text-[9px] font-semibold" style={{ color }}>
-                            {c.verdict === 'validated' ? '通过' : c.verdict === 'weak' ? '偏弱' : '不通过'}
+                            {c.verdict === 'validated' ? '同向' : c.verdict === 'weak' ? '偏弱' : '不通过'}
                           </span>
                         </button>
                       );
                     })}
                     <p className="mt-1 text-[9px] leading-relaxed text-[#3a4356]">
-                      「通过」= 样本外期望 &gt; +0.05R 且样本内同向、样本外 ≥8 笔。网格搜索本身会带来选择偏差，排名第一的组合仍需继续向前验证。
+                      「同向」= 样本外期望 &gt; +0.05R 且样本内同向、样本外 ≥8 笔。网格搜索本身会带来选择偏差，排名第一的组合仍需继续向前验证。
                     </p>
                   </div>
                 ) : (

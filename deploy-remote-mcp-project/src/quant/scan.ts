@@ -354,7 +354,7 @@ export function candidateFrom(
     grade: gradeOf(proba),
     evidence: evidence.map(v => (v == null ? null : r3(v))),
     parts: score.parts.map(v => r3(v)),
-    tags: [...(read.trap.kind ? [read.trap.kind === 'bullTrap' ? '诱多·扫损收回' : '诱空·扫损收回'] : []), ...(sig.tags ?? [])],
+    tags: [...(read.trap.kind ? [read.trap.kind === 'bullTrap' ? '诱多·扫位收回候选' : '诱空·扫位收回候选'] : []), ...(sig.tags ?? [])],
     note: sig.note ?? '',
     trap: read.trap.kind,
     trapScore: read.trap.score,
@@ -428,8 +428,8 @@ export type ExitPlan = 'neck' | 'r15' | 'r10' | 'be' | 'partial';
 export const EXIT_PLANS: { id: ExitPlan; label: string; hint: string }[] = [
   { id: 'neck', label: '颈线目标', hint: '原方案：目标看颈线（受 maxRR 封顶），超时按收盘价平仓' },
   { id: 'r15', label: '固定 1.5R', hint: '目标 = 入场 ± 1.5 倍风险，放弃远端颈线，换取更高兑现率' },
-  { id: 'r10', label: '固定 1.0R', hint: '目标 = 入场 ± 1 倍风险，胜率最高但赔付比最低，成本占比敏感' },
-  { id: 'be', label: '1R 保本', hint: '盈利达到 1R 后把止损移到成本价，剩余仓位继续看颈线，杜绝盈利单变亏损' },
+  { id: 'r10', label: '固定 1.0R', hint: '目标 = 入场 ± 1 倍风险，通常兑现率较高但赔付比较低，成本占比敏感' },
+  { id: 'be', label: '1R 保本', hint: '盈利达到 1R 后把止损移到成本价，剩余仓位继续看颈线，降低回吐风险；滑点/跳空仍可能亏损' },
   { id: 'partial', label: '1R 减半 + 保本', hint: '1R 处平掉一半并锁定成本，剩余一半跑颈线目标' },
 ];
 
@@ -474,8 +474,8 @@ export function simulateWithPlan(
   let stop = sig.stop;
   let armed = false;
   let tookHalf = false;
+  let halfExitAdj = 0;
   let lockedR = 0;
-  let halfCost = 0;
   let exitPrice: number | null = null;
   let exitTs = 0;
   let why: Outcome['why'] = 'time';
@@ -510,10 +510,10 @@ export function simulateWithPlan(
       if (half && !tookHalf) {
         tookHalf = true;
         const trigAdj = dir > 0 ? trigger * (1 - SLIP_RATE) : trigger * (1 + SLIP_RATE);
+        halfExitAdj = trigAdj;
         const halfGross = (trigAdj - entryPrice) * dir;
         const halfFee = (entryPrice + trigAdj) * FEE_RATE;
         lockedR = 0.5 * ((halfGross - halfFee) / risk);
-        halfCost = halfFee + (limit ? trigger : next.o + trigger) * SLIP_RATE;
       }
     }
     if (hitTarget) {
@@ -535,8 +535,12 @@ export function simulateWithPlan(
   const pnl = gross - fee;
   const restR = pnl / risk;
   const r = tookHalf ? lockedR + 0.5 * restR : restR;
-  const restCost = fee + (limit ? exitPrice : next.o + exitPrice) * SLIP_RATE;
-  const totalCost = tookHalf ? 0.5 * halfCost + 0.5 * restCost : restCost;
+  // Cost accounting follows actual legs: one full entry, half exit at trigger,
+  // half exit at the final target/time/stop. Weighting two full round trips
+  // understated entry fees and distorted grossR - costR reconciliation.
+  const entrySlip = limit ? 0 : next.o * SLIP_RATE;
+  const totalFees = entryPrice * FEE_RATE + (tookHalf ? 0.5 * halfExitAdj * FEE_RATE : 0) + (tookHalf ? 0.5 : 1) * exitAdj * FEE_RATE;
+  const totalCost = totalFees + entrySlip + (tookHalf ? 0.5 * trigger * SLIP_RATE : 0) + (tookHalf ? 0.5 : 1) * exitPrice * SLIP_RATE;
   void atr;
   return {
     filled: true,

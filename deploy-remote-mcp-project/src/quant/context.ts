@@ -45,7 +45,7 @@ export function buildContext(cs: Candle[], flow?: FlowSnapshot | null): Ctx {
   let covered = 0;
   for (let i = 0; i < n; i++) {
     const fb = flow?.bars.get(cs[i].ts);
-    if (hasRealFlow(fb, cs[i].v)) {
+    if (hasRealFlow(fb, cs[i].v, cs[i].volumeSource)) {
       delta[i] = fb.buy - fb.sell;
       real[i] = 1;
       covered++;

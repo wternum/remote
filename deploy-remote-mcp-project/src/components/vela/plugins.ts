@@ -6,6 +6,7 @@
  * 均通过 Vela 公开插件 SDK 注册（@luxalgo/vela/plugin），不 fork 库代码。
  */
 import type { SignalGeo, KeyLevel } from "@/lib/types";
+import { registerSessionLayers } from "@/vela/sessions/sessionLayer";
 
 export const OVERLAY_ID = "pa-overlay";
 export const CVD_ID = "pa-cvd";
@@ -110,6 +111,7 @@ export async function registerVelaPlugins() {
   if (registered) return;
   ensureRoundRect();
   registered = true;
+  registerSessionLayers();
   const plugin = await import("@luxalgo/vela/plugin");
 
   // ─── 图层：信号 / FVG / 聚焦结构 ─────────────────────────

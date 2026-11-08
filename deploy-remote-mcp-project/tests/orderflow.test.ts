@@ -91,7 +91,8 @@ function doubleTopTrap() {
   assert.equal(cand!.trap, 'bullTrap');
   assert.equal(cand!.flowSource, 'taker');
   assert.ok(cand!.proba > 0.5, `真实订单流下下跌概率应 > 50%，实际 ${cand!.proba}`);
-  assert.ok(cand!.tags.includes('诱多·扫损收回'));
+  // Public flow identifies a sweep/reclaim candidate, not actual stop orders.
+  assert.ok(cand!.tags.includes('诱多·扫位收回候选'));
   const approx = runScan(cs, '5m', undefined, 'TEST', 'r15', null).confirm.find(c => c.idx === SWEEP)!;
   assert.equal(approx.flowSource, 'approx');
   assert.ok(cand!.proba >= approx.proba, `真实订单流确认应不低于近似：${cand!.proba} vs ${approx.proba}`);

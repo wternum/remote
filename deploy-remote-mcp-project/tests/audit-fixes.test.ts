@@ -166,4 +166,35 @@ const ok = (name: string) => {
   ok(`T10 触价池恢复可成交候选：${passable}/${scan.touch.length} 通过 42% 门槛，confirm 候选仍为 ${scan.confirm.length}`);
 }
 
+// ── T11：分批出场成本按实际成交腿对账，毛利R - 成本R = 净R ─────
+{
+  const { simulateWithPlan, buildContext } = await import('@/quant/scan');
+  const cs: Candle[] = Array.from({ length: 40 }, (_, i) => ({ ts: 1_700_000_000_000 + i * 300_000, o: 100, h: 100.5, l: 99.5, c: 100, v: 1000 }));
+  cs[31] = { ...cs[31], h: 101.2, l: 99.8, c: 101 };
+  cs[32] = { ...cs[32], o: 101, h: 103.2, l: 100.8, c: 102 };
+  const ctx = buildContext(cs);
+  const sig = { idx: 30, ts: cs[30].ts, side: 'long', entry: 100, stop: 99, tp: 103 } as Parameters<typeof simulateWithPlan>[1];
+  let checked = 0;
+  for (const mode of ['confirm', 'touch'] as const) {
+    const o = simulateWithPlan(ctx, sig, mode, 10, 'partial');
+    const c = { id: mode, side: 'long', stop: 99, mode };
+    if (!o?.filled || o.why !== 'tp') continue;
+    const dir = c.side === 'long' ? 1 : -1;
+    const risk = Math.abs(o.entryPrice - c.stop);
+    const slip = 0.0001, feeRate = 0.0005;
+    const rawEntry = c.mode === 'touch' ? o.entryPrice : o.entryPrice / (1 + dir * slip);
+    const trigger = o.entryPrice + dir * risk;
+    const halfExit = trigger * (1 - dir * slip);
+    const finalRaw = o.exitPrice / (1 - dir * slip);
+    const gross = (0.5 * (trigger - rawEntry) * dir + 0.5 * (finalRaw - rawEntry) * dir) / risk;
+    const fees = (o.entryPrice + 0.5 * halfExit + 0.5 * o.exitPrice) * feeRate / risk;
+    const slips = ((c.mode === 'touch' ? 0 : rawEntry * slip) + 0.5 * trigger * slip + 0.5 * finalRaw * slip) / risk;
+    assert.ok(Math.abs(gross - fees - slips - o.r) < 0.006, `净R对账失败 ${c.id}: expected=${gross - fees - slips} actual=${o.r} entry=${o.entryPrice} exit=${o.exitPrice}`);
+    assert.ok(Math.abs(fees + slips - o.costR) < 0.006, `成本R对账失败 ${c.id}: ${fees + slips} != ${o.costR}`);
+    checked++;
+  }
+  assert.ok(checked > 0, '需要可成交的分批止盈样本');
+  ok(`T11 分批出场成本对账：${checked} 笔，误差在发布精度内`);
+}
+
 console.log(`\naudit-fixes: ${passed} 组断言全部通过`);

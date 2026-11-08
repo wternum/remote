@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { VelaWorkspace } from '@luxalgo/vela/workspace';
-import { registerLocale } from '@luxalgo/vela';
+import { registerLocale, unregisterSidePanel, unregisterWidgetAction } from '@luxalgo/vela';
+import { localStorageAdapter, decodeState, encodeState } from '@luxalgo/vela/widget';
 import zhHans from '@luxalgo/vela/locales/zh-Hans';
 import { OKXProvider, OKX_TIMEFRAMES } from './okxProvider';
 import { registerIndicatorPicker } from './registerIndicatorPicker';
@@ -13,14 +14,42 @@ import { installQuantHover } from './toolbarSlide';
 import { installToolbarHover } from './toolbarHover';
 import { registerAnnotLayers } from './annotLayer';
 import { registerSignalPanel } from './registerSignalPanel';
+import { registerSessionLayers } from './sessions/sessionLayer';
+
+// 逐棒审计侧栏已下线：同时清理旧注册，避免热更新/持久布局留下入口。
+unregisterSidePanel('pulsedesk-price-action');
+unregisterWidgetAction('pd-price-action');
 
 // 一次性注册：语言包、指标、标注侧栏及其独立运行器（构造前完成）
 registerLocale(zhHans);
 registerIndicatorPicker();
 registerMarketControls();
 registerSignalPanel();
-// 系统标注图层：渲染器在构造时按注册表实例化图层，必须先于 new VelaWorkspace
+// 系统标注图层与交易时段图层：渲染器在构造时按注册表实例化图层，必须先于 new VelaWorkspace
 registerAnnotLayers();
+registerSessionLayers();
+
+/** Remove retired audit-panel references from old persisted layouts before Vela restores them. */
+export function workspaceStorage() {
+  const base = localStorageAdapter('pulsedesk-vela-workspace');
+  const clean = (raw: string | null): string | null => {
+    if (!raw) return raw;
+    try {
+      const state = decodeState(raw);
+      if (!state?.panels) return raw;
+      let changed = false;
+      if (state.panels.open === 'pulsedesk-price-action') { delete state.panels.open; changed = true; }
+      if (state.panels.pinned?.includes('pulsedesk-price-action')) { state.panels.pinned = state.panels.pinned.filter(id => id !== 'pulsedesk-price-action'); changed = true; }
+      if (state.panels.widths && 'pulsedesk-price-action' in state.panels.widths) { delete state.panels.widths['pulsedesk-price-action']; changed = true; }
+      return changed ? encodeState(state) : raw;
+    } catch { return raw; }
+  };
+  return {
+    get: async (key: string) => clean(await base.get(key)),
+    set: async (key: string, value: string) => { const next = clean(value); if (next != null) await base.set(key, next); },
+    remove: async (key: string) => { await base.remove?.(key); },
+  };
+}
 
 export interface VelaTerminalProps {
   symbol?: string;
@@ -66,6 +95,7 @@ export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe =
         downColor: '#f6465d',
         glow: 0.25,
         persist: 'pulsedesk-vela-workspace',
+        storage: workspaceStorage(),
         autofocus: true,
         // 周期 / 样式 / 指标 都由本模块接管（内置弹层与画布有命中冲突）
         topbar: {
