@@ -272,15 +272,19 @@ export class OKXProvider implements DataProvider {
       }
       if (!page.length) break;
       let added = 0;
+      let pageOldest = oldest;
       for (const r of page) {
         const b = parseRow(r, ticker);
-        if (b && !map.has(b.time)) {
+        if (!b) continue;
+        // 只用成功解析的 K 线推进游标；异常原始行不能把 oldest 污染成 NaN。
+        if (b.time < pageOldest) pageOldest = b.time;
+        if (!map.has(b.time)) {
           map.set(b.time, b);
           added++;
         }
       }
       if (!added) break;
-      oldest = Math.min(oldest, ...page.map(r => Number(r[0])));
+      oldest = pageOldest;
       if (guard % 2 === 0) {
         emit();
         await new Promise(r => setTimeout(r, 120));
@@ -314,6 +318,8 @@ export class OKXProvider implements DataProvider {
           if (parsed) fresh.push(parsed);
         }
         if (!fresh.length || stopped) return;
+        // OKX REST 常按时间倒序返回；实时回调必须收到时间戳最新的一根。
+        fresh.sort((a, b) => a.time - b.time);
         merge(marketKey, fresh);
         const last = fresh[fresh.length - 1];
         if (last) onBar(last);

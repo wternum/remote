@@ -2,8 +2,11 @@
 // 运行：node scripts/run-ts-test.mjs tests/annot-layout.test.ts
 import assert from 'node:assert/strict';
 import {
+  attachedZoneCandidates,
   buildOccupancy,
   eventCandidates,
+  rectGap,
+  ZONE_LABEL_MAX_GAP,
   intersects,
   inside,
   layoutRail,
@@ -176,6 +179,75 @@ function candles(n: number, x0: number, step: number, f: (i: number) => [number,
   const lines = wrapText('冲向前高时主动买入偏弱（+3%）：缺少突破动能', 60, s => s.length * 10);
   assert.ok(lines.length > 1 && lines.every(l => l.length * 10 <= 60));
   console.log('PASS 悬停卡片翻转 · 折行');
+}
+
+// ── 8. 贴附式区域标签：细 FVG 区域被最新 K 线穿过时，标签不得漂到远处价位 ──
+{
+  const bounds: Rect = { x: 0, y: 0, w: 900, h: 560 };
+  // 复现截图场景：一段 K 线从上到下穿过细 FVG 区域的右端，且价格跨度很大。
+  const cols = candles(80, 20, 9, i => [80 + (i % 7) * 40, 260 + (i % 5) * 50]);
+  const occ = buildOccupancy(cols, 3);
+  const last = cols[cols.length - 1];
+  const box: Rect = { x: 300, y: 300, w: last.x + 18 - 300, h: 5 }; // 细区域，延伸到最新 K 线右侧 2 根
+  const w = 44;
+
+  // 候选本身：每一个都必须贴着区域（间隙 ≤ 4px），不存在越过整段 K 线的远端候选。
+  for (const c of attachedZoneCandidates(box, w, H)) {
+    assert.ok(rectGap(c.rect, box) <= ZONE_LABEL_MAX_GAP + 1e-9, `候选 ${c.key} 离开区域 ${rectGap(c.rect, box).toFixed(1)}px`);
+  }
+
+  const pick = pickCandidate(attachedZoneCandidates(box, w, H), occ, [], bounds);
+  assert.ok(pick, '最新 K 线右侧有空白时应能贴边放下');
+  assert.equal(pick!.key, 'right-mid', '优先放在区域右端外侧、价位居中');
+  assert.ok(!occ.hits(pick!.rect), '标签不压 K 线');
+  assert.ok(rectGap(pick!.rect, box) <= ZONE_LABEL_MAX_GAP, '标签与区域贴附');
+  const cy = box.y + box.h / 2;
+  assert.ok(Math.abs(pick!.rect.y + H / 2 - cy) <= H / 2 + 0.5, '标签垂直中心对齐区域价位');
+
+  // 右侧空白被价格轨道标签占用、区域内外都被 K 线覆盖 → 不画文字（null），而不是漂移。
+  const fullOcc = buildOccupancy(candles(120, 0, 8, () => [0, 560]), 3);
+  const blocked = pickCandidate(attachedZoneCandidates(box, w, H), fullOcc, [], bounds);
+  assert.equal(blocked, null, '没有贴边空位时宁可不画文字');
+
+  // 对照：旧的通用候选在同一场景下会给出远离区域的位置，证明这是漂移根因。
+  const legacy = pickCandidate(zoneCandidates(box, w, H, occ), occ, [], bounds);
+  if (legacy && legacy.key.endsWith('candles')) {
+    assert.ok(rectGap(legacy.rect, box) > ZONE_LABEL_MAX_GAP, '旧候选的越过 K 线位置确实远离区域');
+  }
+  console.log(`PASS 贴附式区域标签 · 细 FVG 被 K 线穿过时贴边或隐藏文字（旧候选：${legacy?.key ?? 'null'}）`);
+}
+
+// ── 9. 贴附式区域标签随机压力：任何放下的标签都贴着所属区域、不压 K 线、不出界 ──
+{
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+  const bounds: Rect = { x: 0, y: 0, w: 900, h: 480 };
+  let placed = 0;
+  for (let t = 0; t < 400; t++) {
+    let px = 240;
+    const cols = candles(90, 10, 9, () => {
+      px += (rnd() - 0.5) * 30;
+      px = Math.max(40, Math.min(420, px));
+      return [px - rnd() * 40, px + 10 + rnd() * 40];
+    });
+    const occ = buildOccupancy(cols, 3);
+    const taken: Rect[] = [{ x: 0, y: 0, w: 320, h: 44 }];
+    for (let z = 0; z < 3; z++) {
+      const x0 = cols[Math.floor(rnd() * 70)].x;
+      const y = 40 + rnd() * 380;
+      const box: Rect = { x: x0, y, w: cols[cols.length - 1].x + 18 - x0, h: 2 + rnd() * 30 };
+      const pick = pickCandidate(attachedZoneCandidates(box, 44, H), occ, taken, bounds);
+      if (!pick) continue;
+      assert.ok(rectGap(pick.rect, box) <= ZONE_LABEL_MAX_GAP + 1e-9, '放下的标签必须贴附所属区域');
+      assert.ok(!occ.hits(pick.rect), '不压 K 线');
+      assert.ok(inside(pick.rect, bounds), '不出界');
+      for (const r of taken) assert.ok(!intersects(pick.rect, r, 2), '不与其他标签重叠');
+      taken.push(pick.rect);
+      placed++;
+    }
+  }
+  assert.ok(placed > 600, `大多数区域应能贴边放下标签（${placed}/1200）`);
+  console.log(`PASS 贴附式区域标签随机压力 · 400 个场景 · ${placed}/1200 个标签全部贴附`);
 }
 
 console.log('\n标注排版测试全部通过');

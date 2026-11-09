@@ -7,6 +7,9 @@ const IndicatorPickerHost = lazy(() => import('./vela/IndicatorPickerDialog'));
 const MarketControlsHost = lazy(() => import('./vela/marketControls'));
 // 入场确认引擎的完整分析面板（校准 / 样本外 / 寻优）
 const ConfirmEnginePanel = lazy(() => import('./components/confirm/ConfirmEnginePanel'));
+// 四框架结构分析（SMC 扫损 / 多周期分形 / Wyckoff·失衡 / 拍卖市场 AMT）
+const FrameworksPanel = lazy(() => import('./components/FrameworksPanel'));
+const FrameworkBar = lazy(() => import('./components/FrameworkBar'));
 // 原 PULSEDESK 页面（远程项目原样），可通过 #legacy 访问
 const LegacyPage = lazy(() => import('../remote/setup-mcp-project-locally/src/app/page'));
 // 缺陷修复任务卡（构造 / 策略 / 订单流审计），可通过 #audit 访问
@@ -48,14 +51,20 @@ const useHash = () => {
 
 export default function App() {
   const [engine, setEngine] = useState(false);
+  const [frameworks, setFrameworks] = useState(false);
   const hash = useHash();
 
-  // 快捷键 C：开合确认引擎（输入框内不拦截；Vela 自己的快捷键不受影响）
+  // 快捷键 C：开合确认引擎；F：开合四框架结构分析（输入框内不拦截；Vela 自己的快捷键不受影响）
   const onKey = useCallback((e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
-    if (e.key.toLowerCase() === 'c' && e.shiftKey && !t?.closest('input,textarea,select,[contenteditable="true"]')) {
+    if (t?.closest('input,textarea,select,[contenteditable="true"]')) return;
+    const k = e.key.toLowerCase();
+    if (k === 'c' && e.shiftKey) {
       e.preventDefault();
       setEngine(p => !p);
+    } else if (k === 'f' && e.shiftKey) {
+      e.preventDefault();
+      setFrameworks(p => !p);
     }
   }, []);
   useEffect(() => {
@@ -85,12 +94,16 @@ export default function App() {
         <VelaTerminal />
       </Suspense>
       <Suspense fallback={null}>
+        <FrameworkBar panelOpen={frameworks} onTogglePanel={() => setFrameworks(p => !p)} />
+      </Suspense>
+      <Suspense fallback={null}>
         <IndicatorPickerHost />
       </Suspense>
       <Suspense fallback={null}>
         <MarketControlsHost />
       </Suspense>
       <Suspense fallback={null}>{engine && <ConfirmEnginePanel open={engine} onClose={() => setEngine(false)} />}</Suspense>
+      <Suspense fallback={null}>{frameworks && <FrameworksPanel open={frameworks} onClose={() => setFrameworks(false)} />}</Suspense>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import { installToolbarHover } from './toolbarHover';
 import { registerAnnotLayers } from './annotLayer';
 import { registerSignalPanel } from './registerSignalPanel';
 import { registerSessionLayers } from './sessions/sessionLayer';
+import { registerFrameworkMarking } from './frameworkRuntime';
 
 // 逐棒审计侧栏已下线：同时清理旧注册，避免热更新/持久布局留下入口。
 unregisterSidePanel('pulsedesk-price-action');
@@ -28,6 +29,7 @@ registerSignalPanel();
 // 系统标注图层与交易时段图层：渲染器在构造时按注册表实例化图层，必须先于 new VelaWorkspace
 registerAnnotLayers();
 registerSessionLayers();
+registerFrameworkMarking();
 
 /** Remove retired audit-panel references from old persisted layouts before Vela restores them. */
 export function workspaceStorage() {
