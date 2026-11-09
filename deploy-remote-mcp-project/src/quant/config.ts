@@ -29,13 +29,23 @@ const listeners = new Set<(c: EngineConfig) => void>();
 
 function read(): EngineConfig {
   try {
-    const raw = localStorage.getItem(KEY);
+    return parseStoredConfig(localStorage.getItem(KEY));
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+/** 解析 localStorage 中的配置；存储值不可信，非法字段回落默认值。 */
+export function parseStoredConfig(raw: string | null): EngineConfig {
+  try {
     if (!raw) return { ...DEFAULT_CONFIG };
     const parsed = JSON.parse(raw) as Partial<EngineConfig>;
     return {
-      threshold: typeof parsed.threshold === 'number' ? parsed.threshold : DEFAULT_CONFIG.threshold,
+      // 存储值不可信（手改 / 旧版本 / 其他标签页）：与服务端 cookie 同样夹到合法区间
+      threshold: typeof parsed.threshold === 'number' && Number.isFinite(parsed.threshold)
+        ? clampThreshold(parsed.threshold) : DEFAULT_CONFIG.threshold,
       entryMode: parsed.entryMode === 'touch' ? 'touch' : 'confirm',
-      replaceConfFilter: parsed.replaceConfFilter ?? DEFAULT_CONFIG.replaceConfFilter,
+      replaceConfFilter: typeof parsed.replaceConfFilter === 'boolean' ? parsed.replaceConfFilter : DEFAULT_CONFIG.replaceConfFilter,
     };
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -103,6 +113,9 @@ export function getConfig(): EngineConfig {
 
 export function setConfig(patch: Partial<EngineConfig>): EngineConfig {
   current = { ...current, ...patch };
+  if (patch.threshold != null) {
+    current.threshold = Number.isFinite(patch.threshold) ? clampThreshold(patch.threshold) : DEFAULT_CONFIG.threshold;
+  }
   write(current);
   listeners.forEach(fn => fn(current));
   window.dispatchEvent(new CustomEvent('pulsedesk:confirm-config', { detail: current }));

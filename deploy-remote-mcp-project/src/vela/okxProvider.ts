@@ -98,7 +98,13 @@ async function okxGet(path: string, params: Record<string, string>, signal?: Abo
 
 // ── K 线镜像：provider 是图表唯一的数据源，镜像即图表所见 ──
 type Listener = (key: string) => void;
+export interface BarsHubStatus {
+  incomplete: boolean;
+  reason?: string;
+  updatedAt: number;
+}
 const store = new Map<string, OHLCV[]>();
+const hubStatus = new Map<string, BarsHubStatus>();
 const listeners = new Set<Listener>();
 const keyOf = (ticker: string, tf: string) => `${ticker}|${tf}`;
 
@@ -166,6 +172,9 @@ export const barsHub = {
   get(ticker: string, tf: string): readonly OHLCV[] {
     return store.get(keyOf(ticker, tf)) ?? [];
   },
+  status(ticker: string, tf: string): BarsHubStatus | undefined {
+    return hubStatus.get(keyOf(ticker, tf));
+  },
   subscribe(fn: Listener) {
     listeners.add(fn);
     return () => {
@@ -211,8 +220,11 @@ export class OKXProvider implements DataProvider {
     return base ? brandIcon(base) : undefined;
   }
 
-  /** 默认回看深度：短周期更深（双顶/双底需要足够多的历史关键位） */
+  /** 默认回看深度：短周期更深（双顶/双底需要足够多的历史关键位）；有界 heal 区间则尊重 limit */
   private depthFor(timeframe: string, range: BarRange) {
+    if (range.from != null && range.limit != null) {
+      return Math.min(Math.max(range.limit, 100), 12_000);
+    }
     const m = Number(timeframe);
     const base = !Number.isFinite(m) ? 800 : m <= 5 ? 6000 : m <= 15 ? 4000 : m <= 60 ? 2500 : 1500;
     return Math.min(Math.max(range.limit ?? 0, base, 100), 12_000);
@@ -224,7 +236,7 @@ export class OKXProvider implements DataProvider {
 
   /**
    * 渐进历史：第一页（最新 300 根）立刻交给图表绘制，随后分页向前补齐并逐批推送——
-   * 与参考站一致：先出图，再变深。
+   * 与参考站一致：先出图，再变深。分页失败时自动退避重试，并在彻底失败时记录不完整状态。
    */
   async getBarsProgressive(
     ticker: string,
@@ -261,13 +273,28 @@ export class OKXProvider implements DataProvider {
     emit();
     let oldest = Math.min(...map.keys());
     let guard = 0;
+    let incompleteReason: string | undefined;
     while (map.size < want && Number.isFinite(oldest) && guard++ < 160) {
       if (opts?.signal?.aborted) break;
       if (range.from && oldest <= range.from) break;
-      let page: (string | number)[][] = [];
-      try {
-        page = await okxGet('/api/v5/market/history-candles', { instId: ticker, bar, after: String(oldest), limit: '300' }, opts?.signal);
-      } catch {
+      let page: (string | number)[][] | null = null;
+      let lastErr: unknown;
+      for (let retry = 0; retry < 3; retry++) {
+        if (opts?.signal?.aborted) break;
+        try {
+          page = await okxGet('/api/v5/market/history-candles', { instId: ticker, bar, after: String(oldest), limit: '300' }, opts?.signal);
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (opts?.signal?.aborted || retry === 2) break;
+          await new Promise(r => setTimeout(r, 800 * (retry + 1)));
+        }
+      }
+      if (!page) {
+        if (!opts?.signal?.aborted) {
+          incompleteReason = lastErr instanceof Error ? lastErr.message : '历史分页拉取失败';
+          console.warn(`[OKXProvider] ${marketKey} 历史分页中断（已取 ${map.size}/${want}）：`, incompleteReason);
+        }
         break;
       }
       if (!page.length) break;
@@ -290,6 +317,11 @@ export class OKXProvider implements DataProvider {
         await new Promise(r => setTimeout(r, 120));
       }
     }
+    hubStatus.set(marketKey, {
+      incomplete: Boolean(incompleteReason),
+      reason: incompleteReason,
+      updatedAt: Date.now(),
+    });
     return emit();
   }
 
@@ -301,31 +333,106 @@ export class OKXProvider implements DataProvider {
     let stopped = false;
     let timer: number | null = null;
     let ping: number | null = null;
+    let pongTimer: number | null = null;
+    let backfillTimer: number | null = null;
+    let healConfirmTimer: number | null = null;
+    let reconnectAttempt = 0;
     let opened = false;
+    let backfilling = false;
+
+    const clearSocketTimers = () => {
+      if (ping) { window.clearInterval(ping); ping = null; }
+      if (pongTimer) { window.clearTimeout(pongTimer); pongTimer = null; }
+    };
 
     /**
-     * 重连补洞：OKX 的 candle 频道只推送订阅之后的变化，断线期间收盘的 K 线不会
-     * 补发。旧实现重连后直接续订阅，barsHub 里就留下一个永久缺口；而信号标注
-     * 只分析「最新缺口之后」的连续段（analyze.ts），缺口后不足 30 根时整块标注
-     * 消失。这里在重连时用 REST 把最近 300 根合并回镜像，缺口即被填平。
+     * 重连补洞：拉取覆盖断线期间全部缺失 K 线（超过 300 根时继续向前分页），
+     * 同步写入 barsHub 并将自 prevLastTime 起的新/更新 K 线按时间升序推给图表 onBar；
+     * 失败时退避重试最多 3 次。
      */
-    const backfill = async () => {
+    const backfill = async (attempt = 0) => {
+      if (stopped || backfilling) return;
+      backfilling = true;
+      if (backfillTimer) { window.clearTimeout(backfillTimer); backfillTimer = null; }
+      const existing = store.get(marketKey) ?? [];
+      const hadPriorBars = existing.length > 0;
+      const prevLastTime = existing.at(-1)?.time;
+      const firstUnconfirmed = existing.slice(-60).find(b => (b as MarketBar).confirm === 0)?.time;
+      const gapTarget =
+        firstUnconfirmed != null && prevLastTime != null
+          ? Math.min(firstUnconfirmed, prevLastTime)
+          : prevLastTime;
       try {
-        const page = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '300' });
-        const fresh: OHLCV[] = [];
-        for (const r of page) {
+        const freshMap = new Map<number, OHLCV>();
+        const firstPage = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '300' });
+        for (const r of firstPage) {
           const parsed = parseRow(r, ticker);
-          if (parsed) fresh.push(parsed);
+          if (parsed) freshMap.set(parsed.time, parsed);
         }
-        if (!fresh.length || stopped) return;
-        // OKX REST 常按时间倒序返回；实时回调必须收到时间戳最新的一根。
-        fresh.sort((a, b) => a.time - b.time);
+        if (stopped || !freshMap.size) return;
+
+        let oldest = Math.min(...freshMap.keys());
+        let pageGuard = 0;
+        while (hadPriorBars && gapTarget != null && oldest > gapTarget && pageGuard++ < 40 && !stopped) {
+          const older = await okxGet('/api/v5/market/history-candles', { instId: ticker, bar, after: String(oldest), limit: '300' });
+          if (!older.length) break;
+          let added = 0;
+          let pageOldest = oldest;
+          for (const r of older) {
+            const parsed = parseRow(r, ticker);
+            if (!parsed) continue;
+            if (parsed.time < pageOldest) pageOldest = parsed.time;
+            if (!freshMap.has(parsed.time)) { freshMap.set(parsed.time, parsed); added++; }
+          }
+          if (!added) break;
+          oldest = pageOldest;
+          await new Promise(r => setTimeout(r, 120));
+        }
+        if (stopped) return;
+
+        const fresh = [...freshMap.values()].sort((a, b) => a.time - b.time);
+        if (!fresh.length) return;
         merge(marketKey, fresh);
-        const last = fresh[fresh.length - 1];
-        if (last) onBar(last);
-      } catch {
-        // 补洞失败不阻塞重连；下一次重连会再试
+        if (!hadPriorBars || prevLastTime == null) {
+          const last = fresh[fresh.length - 1];
+          if (last) onBar(last);
+        } else {
+          for (const b of fresh) {
+            if (b.time >= prevLastTime) onBar(b);
+          }
+        }
+      } catch (err) {
+        if (!stopped && attempt < 3) {
+          const delay = 1000 * Math.pow(2, attempt);
+          backfillTimer = window.setTimeout(() => void backfill(attempt + 1), delay);
+        } else if (!stopped) {
+          console.warn(`[OKXProvider] ${marketKey} 重连补洞失败:`, err);
+        }
+      } finally {
+        backfilling = false;
       }
+    };
+
+    const scheduleConfirmRepair = () => {
+      if (stopped || healConfirmTimer) return;
+      healConfirmTimer = window.setTimeout(async () => {
+        healConfirmTimer = null;
+        if (stopped) return;
+        try {
+          const page = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '20' });
+          const fresh: OHLCV[] = [];
+          for (const r of page) {
+            const parsed = parseRow(r, ticker);
+            if (parsed) fresh.push(parsed);
+          }
+          if (fresh.length && !stopped) {
+            fresh.sort((a, b) => a.time - b.time);
+            merge(marketKey, fresh);
+          }
+        } catch {
+          /* next bar/reconnect will retry */
+        }
+      }, 1500);
     };
 
     const open = () => {
@@ -333,21 +440,34 @@ export class OKXProvider implements DataProvider {
       try {
         ws = new WebSocket(WS);
       } catch {
-        timer = window.setTimeout(open, 3000);
+        const delay = Math.min(30_000, 2000 * Math.pow(2, Math.min(4, reconnectAttempt++)));
+        timer = window.setTimeout(open, delay);
         return;
       }
       ws.onopen = () => {
+        if (stopped) { ws?.close(); return; }
         ws?.send(JSON.stringify({ op: 'subscribe', args: [{ channel, instId: ticker }] }));
-        ping = window.setInterval(() => ws?.readyState === 1 && ws.send('ping'), 20_000);
+        ping = window.setInterval(() => {
+          if (stopped || ws?.readyState !== 1) return;
+          ws.send('ping');
+          if (!pongTimer) {
+            pongTimer = window.setTimeout(() => {
+              pongTimer = null;
+              if (!stopped) ws?.close();
+            }, 10_000);
+          }
+        }, 20_000);
         if (opened) void backfill();
         opened = true;
       };
       ws.onmessage = ev => {
+        if (pongTimer) { window.clearTimeout(pongTimer); pongTimer = null; }
+        reconnectAttempt = 0;
         if (ev.data === 'pong') return;
         try {
           const msg = JSON.parse(ev.data as string) as { arg?: { channel?: string }; data?: (string | number)[][] };
           if (msg.arg?.channel !== channel || !msg.data) return;
-          const fresh: OHLCV[] = [];
+          const fresh: MarketBar[] = [];
           for (const r of msg.data) {
             const b = parseRow(r, ticker);
             if (b) {
@@ -355,22 +475,33 @@ export class OKXProvider implements DataProvider {
               fresh.push(b);
             }
           }
-          if (fresh.length) merge(keyOf(ticker, timeframe), fresh);
+          if (fresh.length) {
+            const minNew = Math.min(...fresh.map(b => b.time));
+            const cur = store.get(marketKey) ?? [];
+            const hasStaleUnconfirmed = cur.slice(-8).some(b => b.time < minNew && (b as MarketBar).confirm === 0);
+            merge(marketKey, fresh);
+            if (hasStaleUnconfirmed) scheduleConfirmRepair();
+          }
         } catch {
           /* ignore */
         }
       };
       ws.onclose = () => {
-        if (ping) window.clearInterval(ping);
-        if (!stopped) timer = window.setTimeout(open, 2000);
+        clearSocketTimers();
+        if (!stopped) {
+          const delay = Math.min(30_000, 2000 * Math.pow(2, Math.min(4, reconnectAttempt++)));
+          timer = window.setTimeout(open, delay);
+        }
       };
       ws.onerror = () => ws?.close();
     };
     open();
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
-      if (ping) window.clearInterval(ping);
+      if (timer) { window.clearTimeout(timer); timer = null; }
+      if (backfillTimer) { window.clearTimeout(backfillTimer); backfillTimer = null; }
+      if (healConfirmTimer) { window.clearTimeout(healConfirmTimer); healConfirmTimer = null; }
+      clearSocketTimers();
       ws?.close();
     };
   }

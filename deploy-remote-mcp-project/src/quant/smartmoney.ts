@@ -173,11 +173,21 @@ export function findFvgs(ctx: Ctx, from: number, to: number, upto: number): FvgZ
  * 同一方向的第一次越位记为 BOS；与原方向相反的第一次越位记为 CHoCH。
  */
 export function latestStructure(ctx: Ctx, idx: number): StructureEvent | null {
-  const known = findSwingLevels(ctx)
+  const raw = findSwingLevels(ctx)
     .map(l => ({ level: l, breakIdx: l.breakIdx }))
     .filter((x): x is { level: typeof x.level; breakIdx: number } => x.breakIdx != null && x.breakIdx <= idx)
-    .sort((a, b) => a.breakIdx - b.breakIdx);
-  if (!known.length) return null;
+    .sort((a, b) => a.breakIdx - b.breakIdx || a.level.idx - b.level.idx);
+  if (!raw.length) return null;
+  // 同一根 K 线同向突破多个等高/等低摆动位只记一次结构突破
+  const known: typeof raw = [];
+  for (const item of raw) {
+    const tail = known[known.length - 1];
+    if (tail && tail.breakIdx === item.breakIdx && tail.level.side === item.level.side) {
+      known[known.length - 1] = item;
+    } else {
+      known.push(item);
+    }
+  }
   const last = known[known.length - 1];
   const prev = known.length > 1 ? known[known.length - 2] : null;
   // 最近一次越位方向与上一次相反 → 性质转变（CHoCH），否则为延续（BOS）。
@@ -218,33 +228,69 @@ export function liquidityPool(ctx: Ctx, p: SmcPatternInput, lookback = 160): Liq
 }
 
 /**
- * 订单块候选：推进到关键位之前最后一根反向 K 线。
- * 只作为“候选区域”，并记录确认前是否已经被回踩（mitigated）。
+ * 订单块候选：
+ * · 顶部供应区（Bearish OB）：一顶离开下跌位移前的最后一根阳线
+ * · 底部需求区（Bullish OB）：一底离开上涨位移前的最后一根阴线
+ * 必须先形成有效离开位移后，才判定二测前是否已被回踩（mitigated）。
  */
 export function orderBlockCandidate(ctx: Ctx, p: SmcPatternInput): OrderBlockCandidate | null {
   const top = p.side === 'top';
   const a = Math.max(ctx.atr[p.idx] ?? 0, 1e-9);
-  // 从第二测试向前找，直到位移起点（宽度上限 40 根）。
   let pivot = -1;
-  for (let i = p.second - 1; i >= Math.max(0, p.second - 40); i--) {
+  let displacement = 0;
+  const searchStart = Math.min(ctx.n - 1, p.first);
+  const searchEnd = Math.max(0, p.first - 20);
+  for (let i = searchStart; i >= searchEnd; i--) {
     const c = ctx.cs[i];
-    const opposite = top ? c.c < c.o : c.c > c.o;
-    const displacement = top ? (p.level - c.l) : (c.h - p.level);
-    if (opposite && displacement >= 0.5 * a) { pivot = i; break; }
+    // 供应区：下跌位移前的最后一根阳线；需求区：上涨位移前的最后一根阴线
+    const preMoveCandle = top ? c.c > c.o : c.c < c.o;
+    if (!preMoveCandle) continue;
+    const obLo = Math.min(c.o, c.c);
+    const obHi = Math.max(c.o, c.c);
+    let ext = top ? Infinity : -Infinity;
+    for (let k = i + 1; k < p.second; k++) {
+      ext = top ? Math.min(ext, ctx.cs[k].l) : Math.max(ext, ctx.cs[k].h);
+    }
+    const disp = top ? obHi - ext : ext - obLo;
+    if (Number.isFinite(disp) && disp >= 0.5 * a) {
+      pivot = i;
+      displacement = disp;
+      break;
+    }
   }
   if (pivot < 0) return null;
   const bar = ctx.cs[pivot];
   const lo = Math.min(bar.o, bar.c);
   const hi = Math.max(bar.o, bar.c);
+
+  // 必须先走出离开订单块的有效位移，才算离开；紧挨着的下一根不再直接判为已回踩
+  let departedIdx = -1;
+  for (let k = pivot + 1; k < p.second; k++) {
+    const c = ctx.cs[k];
+    const departed = top
+      ? c.c < lo && lo - c.l >= 0.5 * a
+      : c.c > hi && c.h - hi >= 0.5 * a;
+    if (departed) {
+      departedIdx = k;
+      break;
+    }
+  }
+  if (departedIdx < 0) return null;
+
   let mitigated = false;
   let mitigatedIdx: number | null = null;
-  for (let q = pivot + 1; q <= p.idx; q++) {
+  // 只检查离开后到二测到达之前的区间，二测本身不算"此前已被回踩"
+  for (let q = departedIdx + 1; q < p.second; q++) {
     const c = ctx.cs[q];
-    if (c.h >= lo && c.l <= hi) { mitigated = true; mitigatedIdx = q; break; }
+    if (c.h >= lo && c.l <= hi) {
+      mitigated = true;
+      mitigatedIdx = q;
+      break;
+    }
   }
   return {
     from: pivot, to: p.idx, lo, hi,
-    displacementAtr: Number(((top ? p.level - lo : hi - p.level) / a).toFixed(2)),
+    displacementAtr: Number((displacement / a).toFixed(2)),
     mitigated, mitigatedIdx,
   };
 }
@@ -342,7 +388,7 @@ export function readSmartMoney(
   const hits = evidence.filter(e => e.state === 'hit').length;
   const tags = evidence.filter(e => e.state === 'hit').map(e => e.label);
   const headline = hits
-    ? `${top ? '顶部' : '底部'}关键位 SMC 观察：${tags.slice(0, 3).join(' · ')}（结构命中 ${hits}/5，不是胜率）`
+    ? `${top ? '顶部' : '底部'}关键位 SMC 观察：${tags.slice(0, 3).join(' · ')}（结构命中 ${hits}/${evidence.length}，不是胜率）`
     : `${top ? '顶部' : '底部'}关键位 SMC 观察：没有命中可验证的结构条件`;
 
   return {

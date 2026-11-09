@@ -106,13 +106,46 @@ export function effortResult(ctx: Ctx, windowBars = 96): EffortResult {
   return { window: { from, to, bars: to - from + 1 }, effort: r3(effort), result: r3(result), effPerResult: effPerResult == null ? null : r3(effPerResult), netMoveAtr: r3(netMove), status, reason };
 }
 
-/** First confirmed post-pivot reclaim; a prior close through the level consumes it. */
+function isRangeContextAt(
+  ctx: Ctx,
+  allLevels: ReturnType<typeof findSwingLevels>,
+  lv: ReturnType<typeof findSwingLevels>[number],
+  q: number,
+  horizon: number,
+  a: number,
+): boolean {
+  const { cs } = ctx;
+  const known = allLevels.filter(
+    l => l.idx + RIGHT_CONFIRM_BARS < q && q - l.idx <= horizon + 60,
+  );
+  const tops = known.filter(l => l.side === 'top').sort((x, y) => x.idx - y.idx);
+  const bots = known.filter(l => l.side === 'bottom').sort((x, y) => x.idx - y.idx);
+  if (tops.length < 2 || bots.length < 2) return false;
+  const lastTop = tops[tops.length - 1], prevTop = tops[tops.length - 2];
+  const lastBot = bots[bots.length - 1], prevBot = bots[bots.length - 2];
+  const tol = 0.15 * a;
+  const hh = lastTop.price > prevTop.price + tol;
+  const hl = lastBot.price > prevBot.price + tol;
+  const lh = lastTop.price < prevTop.price - tol;
+  const ll = lastBot.price < prevBot.price - tol;
+  const brokenLow = cs.slice(lastBot.idx + RIGHT_CONFIRM_BARS + 1, q).some(b => b.c < lastBot.price - tol);
+  const brokenHigh = cs.slice(lastTop.idx + RIGHT_CONFIRM_BARS + 1, q).some(b => b.c > lastTop.price + tol);
+  // Active unidirectional markup / markdown is not a Wyckoff accumulation/distribution range.
+  if ((hh && hl && !brokenLow) || (lh && ll && !brokenHigh)) return false;
+  const rangeHigh = Math.max(...tops.map(t => t.price));
+  const rangeLow = Math.min(...bots.map(b => b.price));
+  if (rangeHigh - rangeLow < 1.5 * a) return false;
+  return lv.side === 'top' ? lv.price >= rangeHigh - 0.5 * a : lv.price <= rangeLow + 0.5 * a;
+}
+
+/** First confirmed post-pivot reclaim inside a non-trending range edge; prior break consumes it. */
 export function findSprings(ctx: Ctx, lookback = 160, minDepthAtr = 0.2): SpringEvent[] {
   const { cs, n } = ctx;
   const to = n - 1;
   if (to < 1) return [];
   const horizon = Math.max(1, Math.floor(lookback));
-  const levels = findSwingLevels(ctx).filter(l => l.idx + RIGHT_CONFIRM_BARS <= to && to - l.idx <= horizon + 60);
+  const allLevels = findSwingLevels(ctx);
+  const levels = allLevels.filter(l => l.idx + RIGHT_CONFIRM_BARS <= to && to - l.idx <= horizon + 60);
   const out: SpringEvent[] = [];
   for (const lv of levels) {
     const confirmedIdx = lv.idx + RIGHT_CONFIRM_BARS;
@@ -128,6 +161,12 @@ export function findSprings(ctx: Ctx, lookback = 160, minDepthAtr = 0.2): Spring
       const pierce = top ? c.h - lv.price : lv.price - c.l;
       const reclaimed = top ? c.c < lv.price : c.c > lv.price;
       if (pierce < minDepthAtr * a || !reclaimed) continue;
+      // The range context must be the one known at the reclaim bar itself (only
+      // swings confirmed before q). Evaluating it at the window start mislabels
+      // springs in ranges that later turned into trends, and misses ranges that
+      // formed afterwards. Candidates are rare, so this stays cheap.
+      // The first qualifying reclaim consumes the level either way.
+      if (!isRangeContextAt(ctx, allLevels, lv, q, horizon, a)) break;
       const depth = pierce / a;
       const effortRatio = ctx.volMa[q] > 0 ? ctx.vols[q] / ctx.volMa[q] : null;
       const taker = ctx.real[q] === 1 && ctx.vols[q] > 0 ? r3(ctx.delta[q] / ctx.vols[q]) : null;
@@ -140,7 +179,7 @@ export function findSprings(ctx: Ctx, lookback = 160, minDepthAtr = 0.2): Spring
       out.push({
         kind, idx: q, ts: c.ts, ageBars: to - q, level: lv.price, depthAtr: r3(depth), reclaimed,
         effortRatio: effortRatio == null ? null : r3(effortRatio), taker, quality,
-        reason: `${top ? '冲上前高' : '刺穿前低'} ${depth.toFixed(2)} ATR 后收盘收回：${top ? '上冲回落' : '弹簧'}候选${effortRatio != null ? `，成交额 ${effortRatio.toFixed(1)}×` : '，成交量基线缺失'}。仍需交易区间与后续测试确认。`,
+        reason: `非单边趋势交易区间${top ? '上沿' : '下沿'}被刺穿 ${depth.toFixed(2)} ATR 后收盘收回：${top ? '上冲回落' : '弹簧'}候选${effortRatio != null ? `，成交额 ${effortRatio.toFixed(1)}×` : '，成交量基线缺失'}。仍需后续测试确认。`,
       });
       break;
     }

@@ -101,6 +101,32 @@ function getVisibleTimeRange(args: RendererLayerArgs): { minMs: number; maxMs: n
   };
 }
 
+let cachedAsiaKey = '';
+let cachedAsiaResult: AsiaRangeSummary[] = [];
+
+function getAsiaSummaries(bars: readonly BarLike[], range: { minMs: number; maxMs: number }): AsiaRangeSummary[] {
+  const now = Date.now();
+  const last = bars[bars.length - 1] as (BarLike & { confirm?: 0 | 1 }) | undefined;
+  const prev = bars[bars.length - 2] as (BarLike & { confirm?: 0 | 1 }) | undefined;
+  const key = [
+    bars.length,
+    bars[0]?.time ?? 0,
+    prev?.time ?? 0,
+    prev?.close ?? 0,
+    prev?.confirm ?? '',
+    last?.time ?? 0,
+    last?.close ?? 0,
+    last?.confirm ?? '',
+    range.minMs,
+    range.maxMs,
+    Math.floor(now / 1500),
+  ].join('|');
+  if (key === cachedAsiaKey) return cachedAsiaResult;
+  cachedAsiaKey = key;
+  cachedAsiaResult = computeAsiaRangeLevels(bars, range.minMs, range.maxMs, now);
+  return cachedAsiaResult;
+}
+
 function renderSessionUnder(canvas: HTMLCanvasElement | null, args: RendererLayerArgs | null, prefs: SessionPreferences) {
   if (!canvas || !args) return;
   const ctx = canvas.getContext('2d');
@@ -200,7 +226,7 @@ function renderSessionUnder(canvas: HTMLCanvasElement | null, args: RendererLaye
   }
 
   // 3. 亚盘高低点 (AH / AL) 箱体与水平延伸线
-  const asiaSummaries = computeAsiaRangeLevels(bars, range.minMs, range.maxMs);
+  const asiaSummaries = getAsiaSummaries(bars, range);
   const latestAsia: AsiaRangeSummary | null =
     asiaSummaries.length > 0 ? asiaSummaries[asiaSummaries.length - 1] : null;
 
@@ -382,7 +408,7 @@ function renderSessionOver(canvas: HTMLCanvasElement | null, args: RendererLayer
 
   // 2. AH / AL：扫荡菱形标记 + 右缘吸附价格签（不再把大胶囊压在 K 线上）
   if (prefs.showAsiaRange) {
-    const asiaSummaries = computeAsiaRangeLevels(bars, range.minMs, range.maxMs);
+    const asiaSummaries = getAsiaSummaries(bars, range);
     ctx.font = FONT_TAG;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';

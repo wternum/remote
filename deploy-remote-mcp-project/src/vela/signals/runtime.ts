@@ -1,8 +1,9 @@
 import type { Vela, WidgetContext } from '@luxalgo/vela';
-import type { Candle } from '@/lib/types';
+import { isClosedCandle } from '@/lib/okxCandles';
 import { flowPeriodOf, getFlow, releaseTape, subscribeFlow, syncFlow } from '@/quant/flow';
 import { ANNOT_OVER, ANNOT_UNDER } from '../annotLayer';
 import type { AnnPayload, AnnObstacle } from '../annotTypes';
+import { toCandle } from '../frameworkKey';
 import { barsHub, tfMs } from '../okxProvider';
 import { analyzeSignals, projectSignals, type SignalAnalysis } from './analyze';
 import { signalRecomputeKey, flowRecomputeKey } from './recompute';
@@ -12,15 +13,12 @@ type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: AnnPay
 const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, historyShort: false, lastPrice: 0 });
 
 /**
- * 图表标记已整体下线：画布不再接收 payload，侧栏也只显示行情行与开关。
- * 此时 analyzeSignals + projectSignals 的产物没有任何消费者，实测 1500 根约
- * 11.85ms/次（心跳口径 ~0.8%、节流上限 ~4% 单核持续空转），因此跳过整段计算。
+ * 图表标记已整体下线：画布不再接收 payload，侧栏也隐藏无效开关。
+ * 此时 analyzeSignals + projectSignals 的产物没有任何消费者，跳过整段计算；
+ * 订单流同步已交由 frameworkRuntime 独立维护（按 owner 引用计数）。
  * 恢复标记时把此开关改回 true 即可，检测/排版模块与单测均原样保留。
- *
- * 注意：订单流同步（requestFlow）不受此开关影响——浏览器端入场确认引擎
- * 通过 src/api/engine.ts 的 getFlow() 读取这份缓存，停掉会连带削弱该面板。
  */
-const MARKERS_ENABLED = false;
+export const MARKERS_ENABLED = false;
 
 /** The runtime belongs to the workspace, never the panel. Closing the sidebar leaves it alive. */
 export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () => void {
@@ -95,9 +93,9 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     const old = flowMarket.split('|')[0];
     flowMarket = '';
     flowBusy = false;
-    if (old) releaseTape(old);
+    if (old) releaseTape(old, 'signals');
   };
-  const wantsFlow = () => flowRequested(preferences) && !!flowPeriodOf(timeframe);
+  const wantsFlow = () => MARKERS_ENABLED && flowRequested(preferences) && !!flowPeriodOf(timeframe);
   const requestFlow = () => {
     if (!wantsFlow()) { if (flowMarket) stopFlow(); return; }
     const period = flowPeriodOf(timeframe)!;
@@ -110,15 +108,13 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     const epoch = flowEpoch;
     const controller = flowController!;
     lastFlowRequest = Date.now();
-    // An aborted prior request may still be draining from the module's inflight cache.
-    // On completion a new current-market tick retries if bootstrap was not completed.
-    // First sync backfills enough official per-bar taker data to cover the
-    // annotation lookback (100 bars/page); afterwards only the newest page.
-    // 用 rubikComplete 而非 complete：tape bootstrap 完成不代表官方统计已回填，
-    // 否则首次 rubik 失败后历史真实数据永远不再重试。
     const backfilled = !!getFlow(symbol, period)?.rubikComplete;
     const pages = backfilled ? 1 : Math.min(14, Math.ceil(preferences.lookback / 100) + 1);
-    void syncFlow(symbol, period, { minTs: 0, maxPages: pages, oiPages: backfilled ? 1 : 2, bootstrapBars: period === '5m' ? 12 : 6, bootstrapPages: 300, signal: controller.signal }).finally(() => {
+    void syncFlow(symbol, period, {
+      minTs: 0, maxPages: pages, oiPages: backfilled ? 1 : 2,
+      bootstrapBars: period === '5m' ? 12 : 6, bootstrapPages: 300,
+      signal: controller.signal, owner: 'signals',
+    }).finally(() => {
       if (!alive || controller.signal.aborted || epoch !== flowEpoch) return;
       flowBusy = false;
       needsScan = true;
@@ -162,33 +158,34 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     if (!alive) return;
     attach();
     if (!chart || !symbol) return;
-    if (!preferences.enabled) { if (flowMarket) stopFlow(); paint(); return; }
+    if (MARKERS_ENABLED && !preferences.enabled) { if (flowMarket) stopFlow(); paint(); return; }
     const raw = barsHub.get(symbol, timeframe);
     if (!raw.length) {
       if (Date.now() - lastInputAt > 20_000) loadError = '等待行情数据，请检查 OKX 网络连接。';
       paint(); return;
     }
     loading = false; loadError = '';
+    const now = Date.now();
     const last = raw.at(-1)!;
     const barMs = tfMs(timeframe);
-    const previous = last.time + barMs <= Date.now() ? last : raw.at(-2);
+    const lastCandle = toCandle(last);
+    const previous = last.time < now && isClosedCandle(lastCandle, barMs, now) ? last : raw.at(-2);
     // 键只由「已收盘状态」驱动：未勾选预览时，形成中那根的价格跳动不触发重算
-    // （实测单次全量分析约 18ms/1000 根，按 tick 触发等于白烧 CPU，输出还完全一样）。
     const key = signalRecomputeKey({
       marketKey, length: raw.length, firstTs: raw[0].time, lastTs: last.time,
       prevClose: previous?.close, prevVolume: previous?.volume,
       closedOpen: previous?.open, closedHigh: previous?.high, closedLow: previous?.low,
-      barMs, now: Date.now(), preview: preferences.preview,
+      barMs, now, preview: preferences.preview,
       forming: { high: last.high, low: last.low, close: last.close, volume: last.volume ?? 0 },
     });
     if (key !== candleKey || needsScan) {
       candleKey = key; needsScan = false;
       if (MARKERS_ENABLED) {
-        const candles: Candle[] = raw.map(b => ({ ts: b.time, o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume ?? 0 }));
+        const candles = raw.map(toCandle);
         const period = flowPeriodOf(timeframe);
         try {
-          analysis = analyzeSignals(candles, barMs, preferences, period ? getFlow(symbol, period) : null);
-          lastScanAt = Date.now();
+          analysis = analyzeSignals(candles, barMs, preferences, period ? getFlow(symbol, period) : null, now);
+          lastScanAt = now;
         } catch (e) {
           analysis = blankAnalysis();
           loadError = '标注计算暂不可用；图表与手动画线不受影响。';

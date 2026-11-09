@@ -169,6 +169,28 @@ function renderUnder(f: Frame) {
     ctx.fillRect(xa, Math.min(ye, Y(pos.stop)), xb - xa, Math.abs(Y(pos.stop) - ye));
   }
 
+  // M/W 形态折线几何（paths）
+  for (const path of p.paths ?? []) {
+    const pts = path.points
+      .map(pt => ({ x: X(pt.ts), y: Y(pt.price) }))
+      .filter(pt => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+    if (pts.length < 2) continue;
+    const c = TONE_COLOR[path.tone];
+    ctx.strokeStyle = rgba(c, 0.75);
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    pts.forEach((pt, idx) => (idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = rgba(c, 0.85);
+    for (const pt of pts) {
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   // 关键位：合并后的每组一条线；多价位合并时画一条细色带
   for (const g of groups) {
     const l = g.lead;

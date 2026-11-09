@@ -313,6 +313,7 @@ export function scanTouches(ctx: Ctx, horizon = 12): { events: TouchEvent[]; sta
   const { cs, n, atr } = ctx;
   const events: TouchEvent[] = [];
   const stats: TouchStats = { n: 0, reject: 0, hiN: 0, hiReject: 0, loN: 0, loReject: 0 };
+  const seenTouch = new Set<string>();
   for (const lv of findSwingLevels(ctx)) {
     const top = lv.side === 'top';
     const end = Math.min(lv.breakIdx ?? n - 1, n - 1 - horizon);
@@ -321,6 +322,12 @@ export function scanTouches(ctx: Ctx, horizon = 12): { events: TouchEvent[]; sta
       if (!(a > 0)) continue;
       const hit = top ? cs[q].h >= lv.price - 0.2 * a : cs[q].l <= lv.price + 0.2 * a;
       if (!hit) continue;
+      const key = `${q}:${lv.side}`;
+      if (seenTouch.has(key)) {
+        q += horizon;
+        continue;
+      }
+      seenTouch.add(key);
       const rd = readTouch(ctx, lv, q, q);
       let outcome: TouchEvent['outcome'] = 'drift';
       for (let k = q; k <= Math.min(n - 1, q + horizon); k++) {
@@ -624,12 +631,11 @@ export function findSwingLevels(ctx: Ctx, opts: { left?: number; right?: number;
         if (side === 'top' ? cs[k].h > ext : cs[k].l < ext) ok = false;
       }
       if (!ok) continue;
-      // 之前必须有一段趋势腿
+      // 之前必须有一段趋势腿（用摆动点自身确认时的 ATR 度量）
       let prior = side === 'top' ? Infinity : -Infinity;
       for (let k = Math.max(0, j - 24); k < j; k++) prior = side === 'top' ? Math.min(prior, cs[k].l) : Math.max(prior, cs[k].h);
       if (!(Math.abs(ext - prior) >= priorAtr * a)) continue;
-      const tol = Math.max(0.35 * a, 0.0004 * Math.abs(ext));
-      if (active.some(lv => lv.side === side && Math.abs(lv.price - ext) <= tol)) continue;
+      // 不在源头按同价位丢弃未击穿的等高/等低，否则双顶/双底流动性池无法形成
       const lv: SwingLevel = { idx: j, ts: cs[j].ts, price: ext, side, breakIdx: null };
       active.push(lv);
       out.push(lv);
@@ -912,8 +918,12 @@ export function scanBreakouts(ctx: Ctx, horizon = 48): { events: BreakoutEvent[]
   const levels = findSwingLevels(ctx);
   const stats = emptyBreakoutStats();
   const events: BreakoutEvent[] = [];
+  const seenBreak = new Set<string>();
   for (const lv of levels) {
     if (lv.breakIdx == null) continue;
+    const bkKey = `${lv.breakIdx}:${lv.side}`;
+    if (seenBreak.has(bkKey)) continue;
+    seenBreak.add(bkKey);
     const b = lv.breakIdx;
     if (b + 2 >= n) continue;
     const dir = lv.side === 'top' ? 1 : -1;

@@ -259,7 +259,7 @@ const quoted = (cs: Candle[]) => cs.map(c => ({ ...c, confirm: 1 as const, volum
   assert.ok(!noAmt.payload.levels.some(l => l.id.startsWith('fw:amt:')));
 
   const noFrac = projectFrameworkMarks(report, { ...DEFAULT_FRAMEWORK_MARK_PREFS, fractals: false }, MS);
-  assert.equal(noFrac.hud, null);
+  assert.ok(noFrac.hud !== null, 'disabling fractal markers must keep the 4-framework summary HUD visible');
   assert.ok(!noFrac.payload.events.some(e => e.id.startsWith('fw:frac:')));
 
   const minimal = projectFrameworkMarks(report, { ...DEFAULT_FRAMEWORK_MARK_PREFS, labels: false }, MS);

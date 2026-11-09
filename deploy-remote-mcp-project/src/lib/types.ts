@@ -252,8 +252,22 @@ export const SYMBOLS = [
   { id: "SOL-USDT-SWAP", base: "SOL", label: "SOL 永续", ctVal: 1, minTick: 0.01 },
 ] as const;
 
+const dynamicCtVal = new Map<string, number>();
+
+export function setCtVal(symbol: string, ctVal: number): void {
+  if (symbol && Number.isFinite(ctVal) && ctVal > 0) {
+    dynamicCtVal.set(symbol, ctVal);
+  }
+}
+
+export function tryCtValOf(symbol: string): number | null {
+  const known = SYMBOLS.find((s) => s.id === symbol)?.ctVal;
+  if (known != null) return known;
+  return dynamicCtVal.get(symbol) ?? null;
+}
+
 export function ctValOf(symbol: string): number {
-  return SYMBOLS.find((s) => s.id === symbol)?.ctVal ?? 1;
+  return tryCtValOf(symbol) ?? 1;
 }
 export function symbolBase(symbol: string): string {
   return symbol.split("-")[0] ?? symbol;

@@ -118,7 +118,7 @@ OKX rubik 统计的同源代理（rubik 接口无 CORS）。**严格白名单**�
 
 ## GET /（根路由）
 
-见 `docs/ARCHITECTURE.md` 第 2 节：返回 Vite 构建的单文件 SPA（`dist/index.html`，回退 `public/index.html`），缺失时 503 文本提示。
+见 `docs/ARCHITECTURE.md` 第 2 节：返回 Vite 构建的单文件 SPA（`dist/index.html`；`public/index.html` 已不在仓库，仅手工放置时回退），缺失时 503 文本提示。
 
 ## 服务端调用的 OKX 上游接口（`src/server/okx.ts`）
 

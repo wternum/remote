@@ -103,7 +103,7 @@ proba = sigmoid(logit)
 
 1. `closedCandles` 只保留已收盘 K 线；`buildContext` 建上下文；`scanDoubles` 出形态；
 2. 每个形态经 `candidateFrom` 算概率与模拟结果（`simulateOutcome`：同根内先判止损，保守口径）；
-3. 门槛 = 配置值（`flowFilter` 开启时 `min(0.9, 门槛 + 0.05)`）；概率不足或未成交 → 记录 `status: 'skipped'` 并带 `rejectReason`（`confirm` 未过门槛 / `unfilled` 未成交 / `noNextBar`），保留「检出但未执行」的可观测性；
+3. 门槛 = 配置值（`flowFilter` 开启时 `min(0.9, 门槛 + 0.05)`）；概率不足或未成交 → 记录 `status: 'skipped'` 并带 `rejectReason`（`confirm` 未过门槛 / `unfilled` 未成交；无下一根 K 线的形态在此之前已被丢弃），保留「检出但未执行」的可观测性；
 4. 通过者写 `status: 'done'` 与实际入场/出场/R/持仓根数；`exitReason` 中保本（be）与跳空（gap）归入 `time` 以兼容原统计，真实原因保存在 `exitWhy`；
 5. 概率与等级被写进既有 `tags`/`note`（如「确认 72% · A级」），UI 与推送自动带依据。
 

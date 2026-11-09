@@ -23,7 +23,7 @@ export function broken(len = 80, start = 70, volume = 2500): Candle[] {
 }
 export function retested(len = 78, retestVolume = 1200): Candle[] {
   const cs = broken(len);
-  cs[72] = bar(72, 109.2, 109.3, 108.1, 109.1, retestVolume);
+  cs[72] = bar(72, 109.2, 109.3, 108.4, 109.1, retestVolume);
   return cs;
 }
 export function flowOf(cs: Candle[], buyFraction = 0.75): FlowSnapshot {

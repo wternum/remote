@@ -122,6 +122,6 @@ OKXProvider → barsHub
 - `tests/signal-logic.test.ts`：原价格几何、低RR照常识别、局部证据/连续CVD、85%边界、中性/反向数据、两腿量化、首次普通回踩。
 - `tests/realtime-stability.test.ts` / `realtime-transport.test.ts`：盘中隔离、形成中成交不重算历史、缺口、取消与重连、无浏览器CORS兜底。
 - `tests/signal-annotations.browser.mjs`：测试专用REST/WS；真实Canvas像素、六段详情、时间线定位、7控制项、手机、切币、重连、用户绘图。
-- `scripts/inspect-signals.ts`：真实OKX只读诊断，保存输入与输出，不用合成行情兜底；命令与验证范围见 [测试指南](../../../tests/README.md)。
+- `scripts/inspect-signals.ts`（⚠ 该脚本不在当前仓库中，需从上游仓库取回后才能运行）：真实OKX只读诊断，保存输入与输出，不用合成行情兜底；命令与验证范围见 [测试指南](../../../tests/README.md)。
 
 历史研究资料仍在本目录，仅作术语/研究背景，不是当前接口或收益证明。当前源码入口以本文所列为准。

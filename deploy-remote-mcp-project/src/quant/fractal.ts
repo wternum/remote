@@ -122,8 +122,15 @@ export function fractals(cs: readonly Candle[], k = 2, barMs?: number, now = Dat
       const c = cs[j];
       if (!validBar(c) || c.ts >= now || !isClosedCandle(c, interval, now)) { closed = false; break; }
       if (j === i) continue;
-      if (c.h >= center.h) isH = false;
-      if (c.l <= center.l) isL = false;
+      // Left uses strict inequality so equal highs/lows (flat tops/bottoms) are not
+      // mutually cancelled; right uses >= / <= so only the final equal bar confirms.
+      if (j < i) {
+        if (c.h > center.h) isH = false;
+        if (c.l < center.l) isL = false;
+      } else {
+        if (c.h >= center.h) isH = false;
+        if (c.l <= center.l) isL = false;
+      }
       if (!isH && !isL) break;
     }
     if (!closed) continue;
@@ -201,9 +208,67 @@ export function tfLadder(baseMinutes: number): number[] {
   return res;
 }
 
-const cmpRel = (a: number, b: number, tolPct: number): 1 | 0 | -1 => {
-  const d = (a - b) / Math.max(1e-9, Math.abs(b));
-  return d > tolPct ? 1 : d < -tolPct ? -1 : 0;
+function localAtrSeries(cs: readonly Candle[], period = 14): number[] {
+  const out = new Array<number>(cs.length).fill(0);
+  if (!cs.length) return out;
+  const tr = new Array<number>(cs.length).fill(0);
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    if (!validBar(c)) continue;
+    const prev = i > 0 && validBar(cs[i - 1]) ? cs[i - 1].c : c.o;
+    tr[i] = Math.max(c.h - c.l, Math.abs(c.h - prev), Math.abs(c.l - prev));
+  }
+  let sum = 0;
+  for (let i = 0; i < cs.length; i++) {
+    sum += tr[i];
+    if (i >= period) sum -= tr[i - period];
+    const count = Math.min(i + 1, period);
+    out[i] = count > 0 ? sum / count : 0;
+  }
+  return out;
+}
+
+function alternatingSwings(
+  highs: readonly FractalPoint[],
+  lows: readonly FractalPoint[],
+): { highs: FractalPoint[]; lows: FractalPoint[] } {
+  type Tagged = FractalPoint & { kind: 'high' | 'low' };
+  const merged: Tagged[] = [
+    ...highs.map(h => ({ ...h, kind: 'high' as const })),
+    ...lows.map(l => ({ ...l, kind: 'low' as const })),
+  ].sort((a, b) => a.idx - b.idx);
+
+  const swings: Tagged[] = [];
+  for (let i = 0; i < merged.length; i++) {
+    const p = merged[i];
+    // Handle rare outside bar (both high and low on the exact same idx) in alternation order.
+    if (i + 1 < merged.length && merged[i + 1].idx === p.idx) {
+      const q = merged[i + 1];
+      const last = swings[swings.length - 1];
+      if (last && last.kind === p.kind && last.kind !== q.kind) {
+        merged[i] = q;
+        merged[i + 1] = p;
+      }
+    }
+    const cur = merged[i];
+    const last = swings[swings.length - 1];
+    if (!last || last.kind !== cur.kind) {
+      swings.push(cur);
+    } else if (cur.kind === 'high') {
+      if (cur.price >= last.price) swings[swings.length - 1] = cur;
+    } else {
+      if (cur.price <= last.price) swings[swings.length - 1] = cur;
+    }
+  }
+  return {
+    highs: swings.filter(s => s.kind === 'high').map(({ kind: _k, ...p }) => p),
+    lows: swings.filter(s => s.kind === 'low').map(({ kind: _k, ...p }) => p),
+  };
+}
+
+const cmpTol = (a: number, b: number, tol: number): 1 | 0 | -1 => {
+  const d = a - b;
+  return d > tol ? 1 : d < -tol ? -1 : 0;
 };
 
 interface StructureOptions {
@@ -213,27 +278,41 @@ interface StructureOptions {
 }
 
 /** HH+HL = bull; LH+LL = bear. HH+LL / LH+HL are expansion/contraction, NOT trends. */
-export function tfStructure(cs: readonly Candle[], k = 2, tolPct = 0.0008, options: StructureOptions = {}): TfRow {
+export function tfStructure(cs: readonly Candle[], k = 2, tolPct?: number, options: StructureOptions = {}): TfRow {
   const now = options.now ?? Date.now();
   const interval = options.barMs ?? inferBarMs(cs);
   const requiredBars = Math.max(12, 2 * k + 2);
-  const { highs, lows } = fractals(cs, k, interval, now);
+  const raw = fractals(cs, k, interval, now);
+  const { highs, lows } = alternatingSwings(raw.highs, raw.lows);
   const insufficient = cs.length < requiredBars || highs.length < 2 || lows.length < 2;
   let highRel: HighRel | null = null, lowRel: LowRel | null = null;
   let bias: Tfbias = 'unknown', invalidated = false;
-  let reason = `需要至少 ${requiredBars} 根完整收盘 K 线及两组高低分形；当前 ${cs.length} 根。`;
+  let reason = `需要至少 ${requiredBars} 根完整收盘 K 线及两组交替高低分形；当前 ${cs.length} 根。`;
   const lastHigh = highs.at(-1) ?? null, lastLow = lows.at(-1) ?? null;
   const recentPivots: FractalPivot[] = [];
   if (!insufficient) {
+    const atr = localAtrSeries(cs, 14);
+    // `tolPct` is an optional CAP on the relative floor (legacy callers pass 0.0008);
+    // the effective tolerance is ATR-scaled with a small price floor, so 1m/5m and
+    // daily bars both get a sensible EQH/EQL band instead of a fixed 0.08%.
+    const relFloor = Math.min(tolPct != null && tolPct > 0 ? tolPct : 0.00015, 0.00015);
+    const tolAt = (idx: number, refPrice: number) => {
+      const a = atr[idx] ?? 0;
+      if (a > 0) return Math.max(0.15 * a, relFloor * Math.abs(refPrice));
+      return Math.abs(refPrice) * (tolPct ?? 0.0008);
+    };
+
     for (let i = Math.max(1, highs.length - 2); i < highs.length; i++) {
-      const r = cmpRel(highs[i].price, highs[i - 1].price, tolPct);
+      const tol = tolAt(highs[i].idx, highs[i - 1].price);
+      const r = cmpTol(highs[i].price, highs[i - 1].price, tol);
       recentPivots.push({
         kind: 'high', idx: highs[i].idx, ts: highs[i].ts, price: highs[i].price,
         rel: r === 1 ? 'HH' : r === -1 ? 'LH' : 'EQH', confirmedAt: highs[i].confirmedAt,
       });
     }
     for (let i = Math.max(1, lows.length - 2); i < lows.length; i++) {
-      const r = cmpRel(lows[i].price, lows[i - 1].price, tolPct);
+      const tol = tolAt(lows[i].idx, lows[i - 1].price);
+      const r = cmpTol(lows[i].price, lows[i - 1].price, tol);
       recentPivots.push({
         kind: 'low', idx: lows[i].idx, ts: lows[i].ts, price: lows[i].price,
         rel: r === 1 ? 'HL' : r === -1 ? 'LL' : 'EQL', confirmedAt: lows[i].confirmedAt,
@@ -241,8 +320,8 @@ export function tfStructure(cs: readonly Candle[], k = 2, tolPct = 0.0008, optio
     }
     recentPivots.sort((a, b) => a.idx - b.idx);
     const prevHigh = highs[highs.length - 2], prevLow = lows[lows.length - 2];
-    const hr = cmpRel(lastHigh!.price, prevHigh.price, tolPct);
-    const lr = cmpRel(lastLow!.price, prevLow.price, tolPct);
+    const hr = cmpTol(lastHigh!.price, prevHigh.price, tolAt(lastHigh!.idx, prevHigh.price));
+    const lr = cmpTol(lastLow!.price, prevLow.price, tolAt(lastLow!.idx, prevLow.price));
     highRel = hr === 1 ? 'HH' : hr === -1 ? 'LH' : 'EQH';
     lowRel = lr === 1 ? 'HL' : lr === -1 ? 'LL' : 'EQL';
     if (hr === 1 && lr === 1) bias = 'bull';
@@ -251,11 +330,13 @@ export function tfStructure(cs: readonly Candle[], k = 2, tolPct = 0.0008, optio
     // A confirmed structural low/high violated AFTER it became known invalidates
     // the directional label until a new confirmed pivot sequence forms.
     if (bias === 'bull') {
+      const defTol = tolAt(lastLow!.idx, lastLow!.price);
       invalidated = cs.some((c, i) => i > lastLow!.idx + k && c.ts >= lastLow!.confirmedAt &&
-        c.ts < now && isClosedCandle(c, interval, now) && c.c < lastLow!.price * (1 - tolPct));
+        c.ts < now && isClosedCandle(c, interval, now) && c.c < lastLow!.price - defTol);
     } else if (bias === 'bear') {
+      const defTol = tolAt(lastHigh!.idx, lastHigh!.price);
       invalidated = cs.some((c, i) => i > lastHigh!.idx + k && c.ts >= lastHigh!.confirmedAt &&
-        c.ts < now && isClosedCandle(c, interval, now) && c.c > lastHigh!.price * (1 + tolPct));
+        c.ts < now && isClosedCandle(c, interval, now) && c.c > lastHigh!.price + defTol);
     }
     if (invalidated) {
       bias = 'range';
@@ -282,7 +363,7 @@ export function mtfAlignment(cs: readonly Candle[], baseMinutes: number, k = 2, 
   for (const minutes of tfLadder(baseMinutes)) {
     const ms = minutes * 60_000;
     const bars = resample(cs, baseMinutes * 60_000, ms, { now });
-    const row = tfStructure(bars, k, 0.0008, { barMs: ms, now });
+    const row = tfStructure(bars, k, undefined, { barMs: ms, now });
     row.tf = labelOf(minutes);
     row.minutes = minutes;
     rows.push(row);

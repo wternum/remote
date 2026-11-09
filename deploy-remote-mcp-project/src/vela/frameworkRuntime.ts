@@ -1,7 +1,7 @@
 import type { Vela, WidgetContext } from '@luxalgo/vela';
 import { registerWidgetAttachment } from '@luxalgo/vela';
 import { barsHub } from './okxProvider';
-import { flowPeriodOf, getFlow, subscribeFlow } from '@/quant/flow';
+import { flowPeriodOf, getFlow, releaseTape, subscribeFlow, syncFlow } from '@/quant/flow';
 import { buildFrameworks, type FrameworkReport } from '@/quant/frameworks';
 import { labelOf } from '@/quant/fractal';
 import { projectFrameworkMarks } from '@/quant/frameworkMarks';
@@ -11,6 +11,7 @@ import { getFrameworkMarkStore } from './frameworkMarkStore';
 import {
   DEFAULT_FRAMEWORK_MARKET,
   frameworkInputKey,
+  isSupportedFrameworkSymbol,
   normalizeFrameworkMarket,
   toCandle,
   type FrameworkMarket,
@@ -78,6 +79,60 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lastRunAt = 0;
   let forcePending = false;
+  let flowController: AbortController | null = null;
+  let flowMarket = '';
+  let flowBusy = false;
+  let flowEpoch = 0;
+  let lastFlowRequest = 0;
+
+  const stopFlow = () => {
+    flowEpoch++;
+    flowController?.abort();
+    flowController = null;
+    const old = flowMarket.split('|')[0];
+    flowMarket = '';
+    flowBusy = false;
+    if (old) releaseTape(old, 'framework');
+  };
+
+  const requestFlow = () => {
+    if (!isSupportedFrameworkSymbol(market.symbol)) {
+      if (flowMarket) stopFlow();
+      return;
+    }
+    const period = flowPeriodOf(market.tf);
+    if (!period) {
+      if (flowMarket) stopFlow();
+      return;
+    }
+    const key = `${market.symbol}|${period}`;
+    if (flowMarket !== key) {
+      stopFlow();
+      flowMarket = key;
+      flowController = new AbortController();
+      lastFlowRequest = 0;
+    }
+    if (flowBusy || Date.now() - lastFlowRequest < 30_000) return;
+    flowBusy = true;
+    const epoch = flowEpoch;
+    const controller = flowController!;
+    lastFlowRequest = Date.now();
+    const backfilled = !!getFlow(market.symbol, period)?.rubikComplete;
+    const pages = backfilled ? 1 : Math.min(14, Math.ceil(600 / 100) + 1);
+    void syncFlow(market.symbol, period, {
+      minTs: 0,
+      maxPages: pages,
+      oiPages: backfilled ? 1 : 2,
+      bootstrapBars: period === '5m' ? 12 : 6,
+      bootstrapPages: 300,
+      signal: controller.signal,
+      owner: 'framework',
+    }).finally(() => {
+      if (!alive || controller.signal.aborted || epoch !== flowEpoch) return;
+      flowBusy = false;
+      schedule();
+    });
+  };
 
   const getChart = () => {
     try {
@@ -123,6 +178,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     const next = normalizeFrameworkMarket(symbol, timeframe);
     const nextKey = barsHub.key(next.symbol, next.tf);
     if (hasMarket && nextKey === marketKey) return;
+    stopFlow();
     hasMarket = true;
     market = next;
     marketKey = nextKey;
@@ -132,8 +188,10 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     publishLive({
       market,
       report: null,
-      status: 'loading',
-      message: '切换市场，等待已收盘行情…',
+      status: isSupportedFrameworkSymbol(next.symbol) ? 'loading' : 'error',
+      message: isSupportedFrameworkSymbol(next.symbol)
+        ? '切换市场，等待已收盘行情…'
+        : `暂不支持 ${next.symbol} 的四框架结构分析（仅支持 BTC / ETH / SOL 永续）。`,
       updatedAt: Date.now(),
     });
     paint(true);
@@ -149,6 +207,13 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     attach();
     if (!chart) return;
 
+    if (!isSupportedFrameworkSymbol(market.symbol)) {
+      stopFlow();
+      cachedReport = null;
+      paint();
+      return;
+    }
+
     const raw = barsHub.get(market.symbol, market.tf);
     if (!raw.length) {
       if (cachedReport !== null || liveState.market.symbol !== market.symbol || liveState.market.tf !== market.tf) {
@@ -161,6 +226,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
           updatedAt: lastRunAt,
         });
       }
+      requestFlow();
       paint();
       return;
     }
@@ -198,6 +264,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
         });
       }
     }
+    requestFlow();
     paint();
   };
 
@@ -259,6 +326,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     if (forceRefreshHook === ownHook) forceRefreshHook = null;
     if (timer) clearTimeout(timer);
     if (attachTimer) clearTimeout(attachTimer);
+    stopFlow();
     offBars();
     offFlow();
     offMarks();

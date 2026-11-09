@@ -18,11 +18,14 @@ export const DEFAULT_FRAMEWORK_MARKET: FrameworkMarket = {
   barMs: 300_000,
 };
 
+export const isSupportedFrameworkSymbol = (symbol: string) =>
+  /^(BTC|ETH|SOL)-USDT-SWAP$/.test(symbol);
+
 export function normalizeFrameworkMarket(symbol?: string, timeframe?: string): FrameworkMarket {
   const ticker = (symbol ?? '').replace(/^okx:/i, '');
   const tf = timeframe === '1D' ? 'D' : timeframe === '1W' ? 'W' : timeframe === '1M' ? 'M' : timeframe || DEFAULT_FRAMEWORK_MARKET.tf;
   return {
-    symbol: /^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker) ? ticker : DEFAULT_FRAMEWORK_MARKET.symbol,
+    symbol: ticker || DEFAULT_FRAMEWORK_MARKET.symbol,
     tf,
     barMs: tfMs(tf),
   };

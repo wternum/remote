@@ -7,7 +7,7 @@ The existing Chinese-language Vela/OKX trading workspace has been imported from 
 Requires Node.js 20.19+ (or 22.12+) and npm.
 
 ```sh
-npm ci
+npm install   # 仓库不含 package-lock.json，npm ci 不可用
 node scripts/prepare-runtime.mjs
 npm run dev -- --host 0.0.0.0 --port 5173
 ```

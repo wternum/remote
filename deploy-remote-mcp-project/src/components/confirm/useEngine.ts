@@ -61,9 +61,28 @@ function symbolBreakdown(rows: Row[], threshold: number) {
   }));
 }
 
+export interface EngineMarket {
+  symbol: string;
+  bar: string;
+  /** 图表周期不是引擎支持的 5m/15m 时，记录原周期（如 "4h"），面板据此显式提示已映射 */
+  mappedFrom?: string;
+}
+
+const chartTfLabel = (tf: string) => {
+  if (tf === 'D' || tf === 'W' || tf === 'M') return `1${tf}`;
+  const m = Number(tf);
+  return Number.isFinite(m) && m >= 60 && m % 60 === 0 ? `${m / 60}h` : `${tf}m`;
+};
+
+/** 图表周期 → 引擎周期（引擎只校验过 5m / 15m） */
+export function engineBarOf(tf: string): { bar: '5m' | '15m'; mappedFrom?: string } {
+  const bar = tf === 'D' || tf === 'W' || tf === 'M' || Number(tf) >= 15 ? '15m' : '5m';
+  return tf === '5' || tf === '15' ? { bar } : { bar, mappedFrom: chartTfLabel(tf || '?') };
+}
+
 /** 与页面顶栏的实时选择保持同步（只读 DOM，不改远程组件） */
-export function readActiveMarket(): { symbol: string; bar: string } {
-  const out = { symbol: 'BTC-USDT-SWAP', bar: '5m' };
+export function readActiveMarket(): EngineMarket {
+  const out: EngineMarket = { symbol: 'BTC-USDT-SWAP', bar: '5m' };
   // Vela 工作区：直接读图表当前市场（旧版 header 的 DOM 在主界面不存在，此前永远返回默认值）
   try {
     const ws = (window as unknown as { __velaWs?: { chart?: { market?: { symbol?: string; timeframe?: string } } } })
@@ -72,8 +91,7 @@ export function readActiveMarket(): { symbol: string; bar: string } {
     const ticker = (market?.symbol ?? '').replace(/^okx:/i, '');
     if (/^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker)) {
       out.symbol = ticker;
-      const tf = market?.timeframe ?? '';
-      out.bar = tf === 'D' || tf === 'W' || tf === 'M' || Number(tf) >= 15 ? '15m' : '5m';
+      Object.assign(out, engineBarOf(market?.timeframe ?? ''));
       return out;
     }
   } catch {
@@ -97,7 +115,7 @@ export function readActiveMarket(): { symbol: string; bar: string } {
 export function useEngine(open: boolean) {
   // 默认跟随当前图表市场：合并样本（ALL × 双周期）需要 6 次深拉，冷启动实测
   // 37s；单市场约 9s 且命中共享行情缓存后 <1s。合并样本仍可在面板里一键选择。
-  const [market, setMarket] = useState(() => readActiveMarket());
+  const [market, setMarket] = useState<EngineMarket>(() => readActiveMarket());
   const [payload, setPayload] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

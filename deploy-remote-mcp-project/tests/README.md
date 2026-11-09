@@ -12,6 +12,8 @@ node scripts/run-ts-test.mjs tests/mw-story.test.ts
 for t in tests/*.test.ts; do node scripts/run-ts-test.mjs "$t" || exit 1; done
 # 现有package脚本仍只运行orderflow / annot-layout / audit-fixes
 npm run test:quant
+# 全部 TS 套件（任一失败即退出非 0）
+npm run test:all
 ```
 
 | 文件 | 验证范围 |
@@ -58,6 +60,7 @@ TEST_URL=http://127.0.0.1:3000/ node tests/signal-annotations.browser.mjs
 ## 3. 真实市场只读诊断
 
 ```sh
+# ⚠ scripts/inspect-signals.ts 不在当前仓库中，需从上游取回后才能运行
 # 合约 / 分钟周期 / 回看根数 / 可选真实成交
 node scripts/run-ts-test.mjs scripts/inspect-signals.ts BTC-USDT-SWAP 5 600 flow
 node scripts/run-ts-test.mjs scripts/inspect-signals.ts ALL ALL 600 flow

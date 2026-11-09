@@ -87,6 +87,7 @@ export interface BarLike {
   low: number;
   close: number;
   volume?: number;
+  confirm?: 0 | 1;
 }
 
 export const DAY_MS = 86_400_000;
@@ -371,24 +372,47 @@ export function computeDailyDividers(
   return dividers;
 }
 
+function inferBarStepMs(bars: readonly BarLike[]): number {
+  if (bars.length < 2) return 0;
+  let minStep = Infinity;
+  const start = Math.max(1, bars.length - 25);
+  for (let i = start; i < bars.length; i++) {
+    const dt = bars[i].time - bars[i - 1].time;
+    if (dt > 0 && dt < minStep) minStep = dt;
+  }
+  return Number.isFinite(minStep) ? minStep : 0;
+}
+
+function isSessionBarClosed(b: BarLike, stepMs: number, now: number): boolean {
+  if (b.confirm === 1) return true;
+  if (b.confirm === 0) return false;
+  if (stepMs > 0 && b.time <= now && b.time + stepMs + 1500 > now) return false;
+  return true;
+}
+
 /**
- * 计算每个 UTC 自然日的亚盘高低点 (Asian High / Low) 及其在欧美盘的扫荡/突破状态
+ * 计算每个 UTC 自然日的亚盘高低点 (Asian High / Low) 及其在欧美盘的扫荡/突破状态（仅基于已收盘 K 线）
  */
 export function computeAsiaRangeLevels(
   bars: readonly BarLike[],
   minTimeMs: number,
   maxTimeMs: number,
+  now: number = Date.now(),
 ): AsiaRangeSummary[] {
   if (!bars.length || maxTimeMs < minTimeMs) return [];
+  const stepMs = inferBarStepMs(bars);
+  const closedBars = bars.filter(b => isSessionBarClosed(b, stepMs, now));
+  if (!closedBars.length) return [];
+
   const firstDay = utcDayFloor(minTimeMs);
   const lastDay = utcDayFloor(maxTimeMs);
   const startDay = Math.max(firstDay, lastDay - 30 * DAY_MS);
-  const lastBarTime = bars[bars.length - 1].time;
+  const lastBarTime = closedBars[closedBars.length - 1].time;
 
   // 按 UTC 日分桶
   const dayMap = new Map<number, BarLike[]>();
-  for (let i = 0; i < bars.length; i++) {
-    const b = bars[i];
+  for (let i = 0; i < closedBars.length; i++) {
+    const b = closedBars[i];
     if (b.time < startDay || b.time > lastDay + DAY_MS) continue;
     const d = utcDayFloor(b.time);
     let list = dayMap.get(d);
@@ -442,21 +466,35 @@ export function computeAsiaRangeLevels(
     let lowState: AsiaSweepState = 'untouched';
     let lowTouchMs: number | null = null;
 
-    // 扫描 08:00 UTC 之后的欧美盘 K 线，检测对 AH / AL 的首次扫荡或实体突破
+    // 扫描 08:00 UTC 之后的已收盘 K 线，先扫位收回若后续收盘站稳/跌破仍需更新为突破状态
     for (const b of postAsiaBars) {
-      if (highState === 'untouched' && b.high > high) {
+      if (highState === 'untouched') {
+        if (b.high > high) {
+          highTouchMs = b.time;
+          highLineEndMs = b.time;
+          // 刺破后收盘回到 AH 下方 = 扫位收回（诱多候选）；收盘站稳 AH 上方 = 实体突破
+          highState = b.close <= high ? 'swept_reject' : 'broken';
+        }
+      } else if (highState === 'swept_reject' && b.close > high) {
         highTouchMs = b.time;
         highLineEndMs = b.time;
-        // 刺破后收盘回到 AH 下方 = 扫位收回（诱多候选）；收盘站稳 AH 上方 = 实体突破
-        highState = b.close <= high ? 'swept_reject' : 'broken';
+        highState = 'broken';
       }
-      if (lowState === 'untouched' && b.low < low) {
+
+      if (lowState === 'untouched') {
+        if (b.low < low) {
+          lowTouchMs = b.time;
+          lowLineEndMs = b.time;
+          // 刺破后收盘回到 AL 上方 = 扫位收回（诱空候选）；收盘跌破 AL 下方 = 实体跌破
+          lowState = b.close >= low ? 'swept_reject' : 'broken';
+        }
+      } else if (lowState === 'swept_reject' && b.close < low) {
         lowTouchMs = b.time;
         lowLineEndMs = b.time;
-        // 刺破后收盘回到 AL 上方 = 扫位收回（诱空候选）；收盘跌破 AL 下方 = 实体跌破
-        lowState = b.close >= low ? 'swept_reject' : 'broken';
+        lowState = 'broken';
       }
-      if (highState !== 'untouched' && lowState !== 'untouched') break;
+
+      if (highState === 'broken' && lowState === 'broken') break;
     }
 
     const rangePct = ((high - low) / low) * 100;
@@ -505,14 +543,17 @@ export function getActiveSessionClock(nowMs: number = Date.now(), mode: SessionM
 
   const defs = mode === 'killzone' ? KILLZONE_SESSIONS : MACRO_SESSIONS;
   const day = utcDayFloor(nowMs);
-  const windows = mode === 'macro' ? macroWindows(day, clockMode) : defs.filter(d => !d.isOverlay).map(d => ({ id: d.id, startMs: day + d.startMin * MIN_MS, endMs: day + d.endMin * MIN_MS, label: d.utcWindow, localLabel: '固定 UTC 教学窗口' }));
+  // 观察窗口模式下 london_close 是固定窗口（isOverlay 只表示绘制方式），必须参与进行中/倒计时；
+  // 宏观模式的 overlap 则是伦敦与纽约的实时交集，由 overlapWindow 单独求得。
+  const fixedWindows = (dayMs: number) => defs.map(d => ({ id: d.id, startMs: dayMs + d.startMin * MIN_MS, endMs: dayMs + d.endMin * MIN_MS, label: d.utcWindow, localLabel: '固定 UTC 教学窗口' }));
+  const windows = mode === 'macro' ? macroWindows(day, clockMode) : fixedWindows(day);
   const overlap = mode === 'macro' ? overlapWindow(windows) : null;
   const all = overlap ? [...windows, overlap] : windows;
   const activeSessions = defs.filter(def => all.some(w => w.id === def.id && nowMs >= w.startMs && nowMs < w.endMs));
   let bestDef = defs[0];
   let bestWait = Infinity;
   for (const offset of [-DAY_MS, 0, DAY_MS]) {
-    const ws = mode === 'macro' ? macroWindows(day + offset, clockMode) : defs.filter(d => !d.isOverlay).map(d => ({ id: d.id, startMs: day + offset + d.startMin * MIN_MS }));
+    const ws = mode === 'macro' ? macroWindows(day + offset, clockMode) : fixedWindows(day + offset);
     for (const w of ws) {
       const wait = (w.startMs - nowMs) / MIN_MS;
       if (wait > 0 && wait < bestWait) { bestWait = wait; bestDef = defs.find(d => d.id === w.id) ?? defs[0]; }

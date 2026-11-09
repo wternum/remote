@@ -32,7 +32,7 @@ npm run build   # node scripts/prepare-runtime.mjs && vite build && next build
 Next 的根路由 `GET /` 不做 SSR，而是按顺序读文件返回 HTML：
 
 1. `process.cwd()/dist/index.html`（Vite 产物）；
-2. `public/index.html`（仓库内预置的一份构建产物，dist 缺失时回退）；
+2. `public/index.html`（已不在仓库；仅手工放置时作为 dist 缺失的回退）；
 3. 两者都不存在 → HTTP 503 纯文本提示运行 `npm run build`。
 
 路由声明 `dynamic = 'force-dynamic'`，响应带 `cache-control: no-cache, no-store, must-revalidate`，保证每次拿到最新构建。项目没有 `src/app/page.tsx`，这是刻意设计：页面完全由 SPA 承担，Next 只做 API 与静态托管。
@@ -79,7 +79,7 @@ src/audit/            缺陷修复任务卡看板（#audit）
 | --- | --- | --- | --- |
 | 图表 K 线 | OKX REST + `wss://ws.okx.com/ws/v5/business` 的 `candle{bar}` 频道 | `OKXProvider` → `barsHub`（每 key 上限 12,000 根） | Vela 图表、信号标注 `runtime.ts` |
 | 逐笔主动成交 | OKX `trades` WS + `history-trades` REST 回补 | `src/quant/flow.ts` tape 聚合（约 250ms 发布快照） | M/W证据、标注运行器、确认引擎（浏览器侧复用快照） |
-| 逐根 taker/OI 统计 | OKX rubik（无 CORS） | Next `/api/okx` 代理或浏览器 `localStorage['pulsedesk.okx-proxy']` 基址 | `flow.ts` 的 `syncFlow` |
+| 逐根 taker/OI 统计 | OKX rubik（无 CORS） | Next 同源 `/api/okx` 白名单代理 | `flow.ts` 的 `syncFlow` |
 | 行情聚合 | OKX REST（服务端） | `src/server/okx.ts`（120s 缓存）→ `/api/data`、`/api/backtest`、`/api/engine/scan` | 原版页面 `#legacy`、回测、确认引擎面板 |
 | 盘口 | 原版页面的OKXFeed与引擎扫描REST | `src/lib/okx-ws.ts` / `src/server/okx.ts` | 既有原版/确认引擎功能；M/W主线不声称实现OFI |
 | 持久化 | PostgreSQL / PGlite | `/api/backtest` 写入回测与信号、`/api/signals` 写入实时信号 | 统计与复盘 |

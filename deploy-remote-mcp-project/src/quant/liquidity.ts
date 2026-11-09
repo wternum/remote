@@ -12,6 +12,7 @@ const FRESH_EVENT_BARS = 48;
 
 interface ConfirmedLevel extends SwingLevel {
   confirmedIdx: number;
+  confirmedTs: number;
 }
 
 export interface LiquidityPoolCluster {
@@ -24,6 +25,9 @@ export interface LiquidityPoolCluster {
   active: boolean;
   firstTs: number;
   lastTs: number;
+  /** Open time of the confirming bar when this reference/cluster became known. */
+  firstConfirmedTs: number;
+  confirmedTs: number;
   distanceAtr: number;
 }
 
@@ -62,44 +66,83 @@ const scaleOf = (ctx: Ctx, idx: number) => {
   return Math.max(Number.EPSILON, Math.abs(price) * 0.001);
 };
 
+const levelTol = (ctx: Ctx, lv: ConfirmedLevel) =>
+  Math.max(0.2 * scaleOf(ctx, lv.confirmedIdx), 0.0004 * Math.abs(lv.price));
+
 function confirmedLevels(ctx: Ctx, maxAge: number): ConfirmedLevel[] {
   const to = ctx.n - 1;
   // Default options hit the per-Ctx WeakMap cache; custom maxAge would rescan.
   return findSwingLevels(ctx)
     .filter(l => l.idx + RIGHT_CONFIRM_BARS <= to && to - l.idx <= maxAge)
-    .map(l => ({ ...l, confirmedIdx: l.idx + RIGHT_CONFIRM_BARS }));
+    .map(l => {
+      const confirmedIdx = l.idx + RIGHT_CONFIRM_BARS;
+      return { ...l, confirmedIdx, confirmedTs: ctx.cs[confirmedIdx]?.ts ?? l.ts };
+    });
 }
 
-/** Bounded-width EQH/EQL clusters; single swings are references, not equal-level pools. */
+/** Bounded-width EQH/EQL clusters; only unbroken swings form active equal-level pools. */
 export function equalLevels(ctx: Ctx, maxAge = 480): { tops: LiquidityPoolCluster[]; bottoms: LiquidityPoolCluster[] } {
   const to = ctx.n - 1;
   if (to < 0) return { tops: [], bottoms: [] };
   const price = ctx.cs[to].c;
-  const a = scaleOf(ctx, to);
+  const currentAtr = scaleOf(ctx, to);
   const levels = confirmedLevels(ctx, maxAge);
   const cluster = (side: 'top' | 'bottom') => {
-    const list = levels.filter(l => l.side === side).sort((x, y) => x.price - y.price || x.idx - y.idx);
-    const tol = Math.max(0.35 * a, 0.0004 * Math.abs(price));
+    const active = levels
+      .filter(l => l.side === side && l.breakIdx == null)
+      .sort((x, y) => x.price - y.price || x.idx - y.idx);
+    const broken = levels.filter(l => l.side === side && l.breakIdx != null);
     const out: LiquidityPoolCluster[] = [];
-    let anchor = Infinity;
-    for (const p of list) {
+    let anchorLevel: ConfirmedLevel | null = null;
+    let lastTol = 0;
+    for (const p of active) {
       const last = out[out.length - 1];
-      // Compare with the cluster anchor too, preventing transitive drift across
-      // an arbitrarily wide chain of individually nearby prices.
-      const pActive = p.breakIdx == null;
-      if (last && Math.abs(last.price - p.price) <= tol && Math.abs(anchor - p.price) <= tol) {
+      const pTol = levelTol(ctx, p);
+      // Compare with the cluster anchor too, using each pivot's own confirmation ATR.
+      const pairTol = Math.min(lastTol, pTol);
+      const anchorTol = anchorLevel ? Math.min(levelTol(ctx, anchorLevel), pTol) : pTol;
+      if (last && anchorLevel && Math.abs(last.price - p.price) <= pairTol && Math.abs(anchorLevel.price - p.price) <= anchorTol) {
         last.price = (last.price * last.touches + p.price) / (last.touches + 1);
         last.touches++;
         last.equal = last.touches >= 2;
-        last.active = last.active || pActive;
         last.firstTs = Math.min(last.firstTs, p.ts);
         last.lastTs = Math.max(last.lastTs, p.ts);
+        last.firstConfirmedTs = Math.min(last.firstConfirmedTs, p.confirmedTs);
+        last.confirmedTs = Math.max(last.confirmedTs, p.confirmedTs);
+        lastTol = Math.min(lastTol, pTol);
       } else {
-        anchor = p.price;
-        out.push({ side: side === 'top' ? 'above' : 'below', price: p.price, touches: 1, equal: false, active: pActive, firstTs: p.ts, lastTs: p.ts, distanceAtr: 0 });
+        anchorLevel = p;
+        lastTol = pTol;
+        out.push({
+          side: side === 'top' ? 'above' : 'below',
+          price: p.price,
+          touches: 1,
+          equal: false,
+          active: true,
+          firstTs: p.ts,
+          lastTs: p.ts,
+          firstConfirmedTs: p.confirmedTs,
+          confirmedTs: p.confirmedTs,
+          distanceAtr: 0,
+        });
       }
     }
-    for (const c of out) c.distanceAtr = r3(Math.abs(price - c.price) / a);
+    // Previously broken swings stay single consumed references; never merge into EQH/EQL pools.
+    for (const p of broken) {
+      out.push({
+        side: side === 'top' ? 'above' : 'below',
+        price: p.price,
+        touches: 1,
+        equal: false,
+        active: false,
+        firstTs: p.ts,
+        lastTs: p.ts,
+        firstConfirmedTs: p.confirmedTs,
+        confirmedTs: p.confirmedTs,
+        distanceAtr: 0,
+      });
+    }
+    for (const c of out) c.distanceAtr = r3(Math.abs(price - c.price) / currentAtr);
     return out;
   };
   return { tops: cluster('top'), bottoms: cluster('bottom') };
@@ -114,18 +157,43 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
   const to = n - 1;
   if (to < 1) return [];
   const horizon = Math.max(1, Math.floor(lookback));
+  const windowStart = Math.max(0, to - horizon + 1);
   const levels = confirmedLevels(ctx, horizon + 60);
+
+  // First bar after confirmation where each swing was swept (>= minDepthAtr) or broken.
+  const firstConsumedIdx = new Map<ConfirmedLevel, number>();
+  for (const lv of levels) {
+    if (lv.breakIdx != null && lv.breakIdx <= lv.confirmedIdx) {
+      firstConsumedIdx.set(lv, lv.breakIdx);
+      continue;
+    }
+    const top = lv.side === 'top';
+    for (let q = lv.confirmedIdx + 1; q <= to; q++) {
+      const c = cs[q];
+      const a = scaleOf(ctx, q);
+      const closeBeyond = top ? c.c > lv.price + 0.1 * a : c.c < lv.price - 0.1 * a;
+      const closeInside = top ? c.c < lv.price : c.c > lv.price;
+      const pierce = top ? c.h - lv.price : lv.price - c.l;
+      if (closeBeyond || (pierce >= minDepthAtr * a && closeInside)) {
+        firstConsumedIdx.set(lv, q);
+        break;
+      }
+    }
+  }
+
   const out: StopHunt[] = [];
   for (const lv of levels) {
     // If it was already broken before becoming a confirmed reference, it is not
     // a new resting pool. Comparing only to confirmation time avoids future leakage.
     if (lv.breakIdx != null && lv.breakIdx <= lv.confirmedIdx) continue;
-    const start = Math.max(lv.confirmedIdx + 1, to - horizon + 1);
-    if (start > to) continue;
+    // A level consumed before the requested lookback window is history, not a fresh event.
+    const consumedAt = firstConsumedIdx.get(lv);
+    if (consumedAt != null && consumedAt < windowStart) continue;
     const top = lv.side === 'top';
-    const confirmAtr = scaleOf(ctx, lv.confirmedIdx);
-    const tol = Math.max(0.35 * confirmAtr, 0.0004 * Math.abs(lv.price));
-    const peers = levels.filter(p => p.side === lv.side && Math.abs(p.price - lv.price) <= tol);
+    const lvTol = levelTol(ctx, lv);
+    const peers = levels.filter(p => p.side === lv.side && Math.abs(p.price - lv.price) <= Math.min(lvTol, levelTol(ctx, p)));
+    // Start at the lookback boundary so old confirmations do not hide newer tests.
+    const start = Math.max(lv.confirmedIdx + 1, windowStart);
     for (let q = start; q <= to; q++) {
       const c = cs[q];
       const a = scaleOf(ctx, q);
@@ -133,11 +201,16 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
       const closeInside = top ? c.c < lv.price : c.c > lv.price;
       const pierce = top ? c.h - lv.price : lv.price - c.l;
       if (!closeBeyond && pierce < minDepthAtr * a) continue;
-      // Distinct swings known strictly BEFORE this test; adjacent wiggles at the
-      // same price do not manufacture extra "resting liquidity" counts.
-      const touches = peers.filter(p => p.idx < q && p.confirmedIdx < q).length;
+      // Only count peers confirmed strictly before q that have NOT already been
+      // broken or consumed prior to q.
+      const touches = peers.filter(p => {
+        if (!(p.idx < q && p.confirmedIdx < q)) return false;
+        if (p.breakIdx != null && p.breakIdx < q) return false;
+        const peerConsumedAt = firstConsumedIdx.get(p);
+        return peerConsumedAt == null || peerConsumedAt >= q;
+      }).length;
       if (touches < minTouches) {
-        if (closeBeyond) break; // Consumed single swing; latestStructure handles it.
+        if (closeBeyond || (pierce >= minDepthAtr * a && closeInside)) break; // Consumed single swing.
         continue;
       }
       if (!closeInside && !closeBeyond) continue; // Close too near the edge: unresolved.
@@ -148,8 +221,8 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
       const depth = Math.max(0, pierce / a);
       const side = top ? 'above' : 'below';
       const reason = kind === 'sweep'
-        ? `${top ? '上方' : '下方'} ${touches} 个已确认摆动参考价被刺穿 ${depth.toFixed(2)} ATR 后收盘收回：扫位收回候选。公共行情无法证明止损单身份或数量。`
-        : `${top ? '上方' : '下方'} ${touches} 个已确认摆动参考价被收盘越过缓冲带：越位候选，不等同多根成交接受或“真突破”。`;
+        ? `${top ? '上方' : '下方'} ${touches} 个未破摆动参考价被刺穿 ${depth.toFixed(2)} ATR 后收盘收回：扫位收回候选。公共行情无法证明止损单身份或数量。`
+        : `${top ? '上方' : '下方'} ${touches} 个未破摆动参考价被收盘越过缓冲带：越位候选，不等同多根成交接受或“真突破”。`;
       out.push({ side, level: lv.price, idx: q, ts: c.ts, ageBars: to - q, depthAtr: r3(depth), touches, reclaimed, kind, taker, reason });
       break;
     }

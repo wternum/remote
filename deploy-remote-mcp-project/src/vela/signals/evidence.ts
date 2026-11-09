@@ -94,8 +94,9 @@ export function readMwEvidence(ctx: Ctx, p: AnnotationPattern, barMs: number, fl
   if (secondRatio === null) missing.push('推进腿量比缺失');
   else if (secondRatio <= 0.9) positive.push('第二腿缩量');
   else if (secondRatio > 1.1) negative.push('第二腿放量，更像延续');
-  if (wickRatio >= 0.35) positive.push('关键位拒绝影线');
+  // 合并单根形态定义本身的拒绝条件，避免与 patterns.ts 门槛重复计分
   if (sweepAtr >= 0.05 && closedInside) positive.push('价格扫位收回');
+  else if (wickRatio >= 0.55) positive.push('显著拒绝影线');
   if ((confirmVolume ?? 0) >= 1.5) positive.push('确认K放量');
   if (test && confirmation) {
     if (test.ratio * dir >= 0.06 && confirmation.ratio * dir >= -0.02) positive.push('真实成交支持反转方向');

@@ -173,7 +173,7 @@ PULSEDESK 是一个**中文加密货币短线观察工作台**。它把三件事
 .
 ├── index.html                    Vite SPA 的 HTML 模板（挂载点 #root，入口 /src/main.tsx）
 ├── package.json                  脚本与依赖声明（name 仍为模板名 "nextjs-postgresql-template"）
-├── package-lock.json             ⚠ 与 package.json 不同步，npm ci 会失败（见 2.4）
+├── （无 package-lock.json）      锁文件已不在仓库中，npm ci 不可用，需 npm install（见 2.4）
 ├── vite.config.ts                react + tailwind + singlefile 三插件，alias @→src
 ├── next.config.ts                空配置 {}
 ├── tsconfig.json                 strict、bundler 解析、@/* 路径、next 插件
@@ -189,7 +189,7 @@ PULSEDESK 是一个**中文加密货币短线观察工作台**。它把三件事
 │   ├── vite-env.d.ts             Vite 客户端类型 + ?url&inline 模块声明
 │   │
 │   ├── app/                      Next App Router（只有 route handler，没有 page.tsx）
-│   │   ├── route.ts              GET / → 读 dist/index.html，回退 public/index.html，再缺 → 503
+│   │   ├── route.ts              GET / → 读 dist/index.html（public/index.html 已不在仓库，仅手工放置时回退），再缺 → 503
 │   │   ├── layout.tsx            RootLayout（模板遗留：title 仍是 "Arena Next.js PostgreSQL Starter"）
 │   │   ├── globals.css           仅 @import "tailwindcss"
 │   │   └── api/
@@ -301,7 +301,7 @@ PULSEDESK 是一个**中文加密货币短线观察工作台**。它把三件事
 ├── scripts/
 │   ├── prepare-runtime.mjs       ★ 构建第一步：esbuild 打包 PGlite 运行时 + 复制 wasm/data
 │   ├── run-ts-test.mjs           单测运行器：esbuild 打包到 .verification/ 后 import 执行
-│   ├── inspect-signals.ts        真实市场只读诊断（不用合成行情），产出可复现输入/输出 JSON
+│   ├── （inspect-signals.ts）    ⚠ 已不在仓库：真实市场只读诊断脚本，需从上游取回
 │   └── mcp_client.py / import_project.py / complete_import.py
 │                                 导入工具（读环境变量 MCP_URL_BASE64；Web 应用不含该地址）
 │
@@ -579,7 +579,7 @@ flow 快照(quant/flow) ─┼─▶ runtime.ts run() ─▶ signalRecomputeKey 
    - `paramsFor(mode)` 把 `trendBlock` 设为 50（关闭一刀切逆势屏蔽，改由连续 `trendExhaust` 证据 + 概率门槛决定）、`entryMode` 映射为 `limit`(touch)/`confirm`；
    - `scanDoubles` → 每形态 `candidateFrom(ctx, s, mode, maxHold)` → `annotate()` 把概率写进既有 `tags`/`note`（如「确认 72% · A级」「等确认K」）；
    - 过滤：`opts.flowFilter && !replaceConf && s.conf < CONF_MIN(60)` → 丢弃；无 `outcome` → 丢弃；
-   - `proba < threshold`（`flow=on` 时门槛为 `min(0.9, threshold+0.05)`）或未成交 → 记 `status:'skipped'` 并附 `rejectReason`（`confirm` / `unfilled` / `noNextBar`），保留"检出但未执行"的可观测性；
+   - `proba < threshold`（`flow=on` 时门槛为 `min(0.9, threshold+0.05)`）或未成交 → 记 `status:'skipped'` 并附 `rejectReason`（`confirm` 未过门槛 / `unfilled` 未成交；无下一根 K 线的形态在此之前已被丢弃），保留"检出但未执行"的可观测性；
    - 通过者记 `status:'done'` + 实际入场/出场/R/持仓根数；`exitReason` 把 `be`(保本) 与 `gap`(跳空) 归入 `time` 以兼容原始 `summarize` 的 tp/sl/time 契约，真实原因另存 `exitWhy`；
 6. **汇总**：`summarize(recs, {symbol,bar,from,to,bars,scope,opts,symbols})`（原始引擎）产出 `overall`/`bySide`/`byPattern`/`bySymbol`/`byHourDay`/`rDist`/`equity`；再回显 `engine:{threshold,entryMode,replaceConfFilter}` 便于核对口径；
 7. **落库**（try/catch，失败只 `console.warn("persist failed:", e)`，不影响返回）：
@@ -606,7 +606,7 @@ flow 快照(quant/flow) ─┼─▶ runtime.ts run() ─▶ signalRecomputeKey 
    - 否则（Vite SPA 回退把缺失路径回成 HTML）→ 503 `{"code":"503","msg":"OKX statistics require the server-side proxy; live trades remain available","data":[]}`；
    - catch 中：若是 abort 则**原样重抛**，否则 502 `{"code":"502","msg":"Statistics proxy unavailable; no browser upstream fallback","data":[]}`；
    - 设计意图（注释 + `docs/OPTIMIZATION.md` 第 3 节第 10 条）：rubik 无 CORS，绝不在浏览器里直连上游；快速切币时被中止的请求不能被误当成上游故障。
-3. **浏览器基址选择**（`src/quant/flow.ts:116-128` `rubikBase()`）：Node 环境返回 `https://www.okx.com`；浏览器优先读 `localStorage['pulsedesk.okx-proxy']`（必须匹配 `^https?://`，去尾斜杠），否则默认 `${window.location.origin}/api/okx`（注释：没有代理时浏览器只有约 8 根 tape 覆盖）。
+3. **浏览器基址选择**（`src/quant/flow.ts:116-128` `rubikBase()`）：Node 环境返回 `https://www.okx.com`；浏览器固定使用同源白名单代理 `${window.location.origin}/api/okx`（旧版 `localStorage['pulsedesk.okx-proxy']` 覆盖已移除）（注释：没有代理时浏览器只有约 8 根 tape 覆盖）。
 
 ---
 
@@ -1025,9 +1025,9 @@ coverage = (buy + sell) / candleVol
 | 数据 | 拥有者（写） | 读取者 |
 | --- | --- | --- |
 | K 线镜像 `barsHub` | `OKXProvider.getBarsProgressive` / `subscribe`（唯一写入方） | Vela 图表、`signals/runtime.ts`（→ `analyzeSignals`）、确认引擎面板间接 |
-| 订单流快照 `flow.cache` | `syncFlow`（rubik + tape 两条来源都写 `bars`） | `buildContext`、`api/engine.ts`（浏览器分支 `getFlow`）、`signals/runtime.ts`、`inspect-signals.ts` |
+| 订单流快照 `flow.cache` | `syncFlow`（rubik + tape 两条来源都写 `bars`） | `buildContext`、`api/engine.ts`（浏览器分支 `getFlow`）、`signals/runtime.ts`、`vela/frameworkRuntime.ts` |
 | 引擎配置 | `setConfig`（UI）→ localStorage + cookie | `getConfig`（浏览器各处）、`configFromCookie`（`/api/backtest`） |
-| 标注偏好 | `SignalStore.patch/toggle/allOn/allOff/persist` → `localStorage['pulsedesk.signal-annotations.v2']` | `runtime.ts`、`analyze.ts`、`SignalPanel.tsx`、`inspect-signals.ts` |
+| 标注偏好 | `SignalStore.patch/toggle/allOn/allOff/persist` → `localStorage['pulsedesk.signal-annotations.v2']` | `runtime.ts`、`analyze.ts`、`SignalPanel.tsx` |
 | 工作区布局 | Vela 自身 `persist:'pulsedesk-vela-workspace'` | Vela |
 | 指标收藏 | `IndicatorBrowser` → `localStorage['vela-indicator-library-favorites-v1']` | `IndicatorBrowser` |
 | `signals` / `backtest_runs` 表 | `/api/backtest`（`origin='backtest'`）、`/api/signals`（`origin='live'`） | `/api/health` 只做 `select 1`；**没有任何读取表数据用于展示的接口**（【代码已确认】无 GET 列表接口） |
@@ -1038,7 +1038,7 @@ coverage = (buy + sell) / candleVol
 | --- | --- | --- | --- | --- |
 | 图表 K 线 | OKX REST `market/candles` + `history-candles`；WS `business` 的 `candle{bar}` | `OKXProvider` → `barsHub`（12,000 根/key） | Vela 图表、标注运行器 | — |
 | 逐笔主动成交 | WS `public` 的 `trades` + REST `history-trades` 回补 | `aggregateFlowTrades` → `FlowSnapshot.bars`（`src:'tape'`），250ms 合并通知 | M/W 证据、`ctx.delta/real`、`bigBiasOf` | `src:'tape'` |
-| 逐根 taker / OI 官方统计 | OKX `rubik`（**无 CORS**） | Node 直连 或 浏览器经 `/api/okx` 代理（或 `localStorage['pulsedesk.okx-proxy']` 基址） | `syncRubik` → `FlowSnapshot.bars`（`src:'rubik'`）、`ctx.oi` | `src:'rubik'` |
+| 逐根 taker / OI 官方统计 | OKX `rubik`（**无 CORS**） | Node 直连 或 浏览器经同源 `/api/okx` 代理 | `syncRubik` → `FlowSnapshot.bars`（`src:'rubik'`）、`ctx.oi` | `src:'rubik'` |
 | 行情聚合 | OKX REST（服务端） | `src/server/okx.ts`（120s 缓存）→ `/api/data`、`/api/backtest`、`/api/engine/scan` | `#legacy` 页面、回测、确认引擎面板 | `live:true/false` |
 | 盘口 | 引擎扫描 REST `market/books`（10 档）；原版页面 WS `books5`（5 档） | `fetchBookLive` → `bookImbalance` → `LiveFlow.bookImb`；`OKXFeed.onBook` | `bookImbalance` 因子、原版页面显示 | `null` 表示无数据 |
 | K 线近似 delta | 由 OHLC 推算（`approxDeltaAt`） | `buildContext` 在无真实覆盖时填入 `ctx.delta` | 仅近似类观察（界面必须标 `≈`） | `ctx.real[i]=0` |
@@ -1164,7 +1164,7 @@ coverage = (buy + sell) / candleVol
 
 #### GET `/`
 
-按顺序尝试 `{cwd}/dist/index.html` → `{cwd}/public/index.html`，命中则 200 返回 HTML（`content-type: text/html; charset=utf-8` + 禁缓存头）；两者都缺失返回 **503 纯文本**：
+按顺序尝试 `{cwd}/dist/index.html` → `{cwd}/public/index.html`（后者已不在仓库，仅手工放置时生效），命中则 200 返回 HTML（`content-type: text/html; charset=utf-8` + 禁缓存头）；两者都缺失返回 **503 纯文本**：
 ```
 PULSEDESK SPA bundle is missing. Run `npm run build` (prepare-runtime + vite build + next build), or `npm run build:spa` for the frontend only.
 ```
@@ -1212,7 +1212,7 @@ PULSEDESK SPA bundle is missing. Run `npm run build` (prepare-runtime + vite bui
 | 日志 | 全部为 `console.*`，无日志框架、无落盘、无采集。关键前缀：`[确认引擎]`（`src/lib/engine.ts:179`）、`[订单流]`（`src/quant/flow.ts` 两处 `console.warn`）、`[信号标注]`（`signals/runtime.ts:180`）、`API {pathname}:`（`bootstrap.ts:54`）、`Preview runtime 初始化失败…`（`App.tsx:17`）、`Local persistence unavailable:`（`bootstrap.ts:16`）、`Server schema init failed:` / `Server database unavailable:`（`db/index.ts:65,140`）、`persist failed:` / `signal persist failed:`（两个 route） |
 | 监控 | 无。**`#audit` 看板是历史修复记录，不是运行时监控**（`src/audit/AuditBoard.tsx` 只渲染静态 `AUDIT_TASKS`） |
 | 异常处理风格 | "降级而不中断"：数据库失败 → 只放弃持久化；行情失败 → 合成数据 + `live:false`；rubik 失败 → 改用逐笔 + 5 分钟冷却；标注计算抛错 → 空分析 + 中文错误提示，图表与手动画线不受影响；PGlite 资源不合格 → CDN 回退；Vela 构造失败 → `console.error` 后页面空白（无兜底 UI） |
-| 诊断出口 | `window.__velaWs`（工作区实例）、`ctx.host.dataset.signal*`（标注计数/市场/revision）、`scripts/inspect-signals.ts`（真实市场只读诊断，产出 `.verification/mw-live-*` JSON） |
+| 诊断出口 | `window.__velaWs`（工作区实例）、`ctx.host.dataset.signal*`（标注计数/市场/revision）、`scripts/inspect-signals.ts`（⚠ 该脚本不在当前仓库中，需从上游仓库取回后才能运行） |
 
 ### 8.7 缓存、并发、超时与重试一览
 
@@ -1324,9 +1324,9 @@ npm run preview -- --host 0.0.0.0 --port 4173          # 【未执行】需先�
 | `dist/pglite.js`、`dist/runtime/*` | `vite build`（复制 `public/`） | 否 | 浏览器 PGlite 运行时 |
 | `public/runtime/pglite.js` | `prepare-runtime.mjs`（esbuild） | **是**（590KB） | 仓库已提交一份 |
 | `public/runtime/{pglite.wasm,initdb.wasm,pglite.data}` | `prepare-runtime.mjs`（从 `node_modules/@electric-sql/pglite/dist/` 复制） | **否** | 【本次运行已验证】GitHub tree 只列出 `public/index.html`、`public/pglite.js`、`public/runtime/pglite.js`；三个二进制**未提交**，必须先跑 prepare-runtime，否则浏览器端会走 jsDelivr CDN 回退（`src/db/index.ts:15`） |
-| `public/index.html` | 手工预置的一份构建产物快照（3.5MB） | 是 | `dist` 缺失时根路由的回退 |
+| `public/index.html` | 旧版手工预置的构建产物快照 | **否**（已从仓库删除） | 根路由回退路径仍在，仅手工放置时生效 |
 | `.next/` | `next build` | 否 | 服务端构建 |
-| `.verification/` | `run-ts-test.mjs`、`inspect-signals.ts`、浏览器套件 | 否（gitignore） | 测试产物、真实市场诊断输入/输出、截图 |
+| `.verification/` | `run-ts-test.mjs`、浏览器套件 | 否（gitignore） | 测试产物、真实市场诊断输入/输出、截图 |
 
 **两种部署形态**：
 
@@ -1344,7 +1344,7 @@ npm run preview -- --host 0.0.0.0 --port 4173          # 【未执行】需先�
 | `pulsedesk.signal-annotations.v2` | `src/vela/signals/store.ts:106` | 7 个显示控制 + `enabled/labels/geometry/allowApprox/preview/lookback` + `version:2` |
 | `pulsedesk.signal-annotations.v1` | 旧版本 | 只读，用于迁移共有字段；**保留旧值供回退**，不整体清空 |
 | `vela-indicator-library-favorites-v1` | `src/vela/library/data.ts:186` | 指标收藏 |
-| `pulsedesk.okx-proxy` | 手工设置（无 UI 入口） | rubik 代理基址，必须匹配 `^https?://`；缺省时用 `${origin}/api/okx` |
+| ~~`pulsedesk.okx-proxy`~~ | 已移除 | 代码不再读取该键；rubik 固定走同源 `/api/okx` |
 
 ### 9.6 外部服务依赖清单
 
@@ -1412,7 +1412,7 @@ TEST_URL=http://127.0.0.1:3000/ node tests/signal-annotations.browser.mjs
 node scripts/run-ts-test.mjs scripts/inspect-signals.ts BTC-USDT-SWAP 5 600 flow
 node scripts/run-ts-test.mjs scripts/inspect-signals.ts ALL ALL 600 flow
 ```
-【未执行】。`scripts/inspect-signals.ts`（100 行，全文已读）行为：参数校验（只允许 BTC/ETH/SOL、5/15、300/600/1200）→ 真实 OKX K 线（预算 = 回看 + 900 根，429 退避 700×(n+1)，30 页上限，页间 220ms）→ 可选 `syncFlow` → `analyzeSignals` + `projectSignals`（默认偏好与全开偏好各一次）→ 连续段 `buildContext` + `scanAnnotationPatterns` 对照 → 5 次计时取中位数 → **扰动形成中价格两次并比较 M/W 签名**（`signature()` 只取 id/title/origin/evidence/phase/targets/timeline）→ 写 `.verification/mw-live-{symbol}-{tf}-input.json` / `-analysis.json` / `mw-live-summary.json`；若 `!stable || duplicateRecordIds` 则抛 `M/W invariant failed`。**明确不使用合成行情兜底**（无真实响应直接抛错）。
+【未执行】（⚠ 该脚本不在当前仓库中，需从上游仓库取回后才能运行）。下列为该脚本在上游版本中的行为：：参数校验（只允许 BTC/ETH/SOL、5/15、300/600/1200）→ 真实 OKX K 线（预算 = 回看 + 900 根，429 退避 700×(n+1)，30 页上限，页间 220ms）→ 可选 `syncFlow` → `analyzeSignals` + `projectSignals`（默认偏好与全开偏好各一次）→ 连续段 `buildContext` + `scanAnnotationPatterns` 对照 → 5 次计时取中位数 → **扰动形成中价格两次并比较 M/W 签名**（`signature()` 只取 id/title/origin/evidence/phase/targets/timeline）→ 写 `.verification/mw-live-{symbol}-{tf}-input.json` / `-analysis.json` / `mw-live-summary.json`；若 `!stable || duplicateRecordIds` 则抛 `M/W invariant failed`。**明确不使用合成行情兜底**（无真实响应直接抛错）。
 
 #### 必需构建检查
 
@@ -1902,7 +1902,7 @@ stateDiagram-v2
 | `src/App.tsx` | 96 | 哈希路由外壳 + Shift+C + 后台启动 |
 | `src/app/api/backtest/route.ts` | 152 | 回测 + 落库 |
 | `scripts/prepare-runtime.mjs` | 44 | 构建第一段 |
-| `scripts/inspect-signals.ts` | 100 | 真实市场只读诊断 |
+| `scripts/inspect-signals.ts` | — | 真实市场只读诊断（⚠ 该脚本不在当前仓库中，需从上游仓库取回后才能运行） |
 
 ### 12.2 阅读覆盖记录
 
@@ -1918,7 +1918,7 @@ stateDiagram-v2
 - `src/vela/`：`VelaTerminal.tsx`、`okxProvider.ts`、`annotTypes.ts`、`registerSignalPanel.tsx`
 - `src/vela/signals/`：`README.md`、`store.ts`、`recompute.ts`、`patterns.ts`、`evidence.ts`、`scenario.ts`、`runtime.ts`、`analyze.ts`、`mwStory.ts`、`MwStoryDetails.tsx`、`smart-money-research.md`
 - `src/components/confirm/useEngine.ts`
-- `scripts/`：`prepare-runtime.mjs`、`run-ts-test.mjs`、`inspect-signals.ts`
+- `scripts/`：`prepare-runtime.mjs`、`run-ts-test.mjs`（`inspect-signals.ts` 已不在仓库）
 - `tests/README.md`；全部 13 个 `.test.ts` 的 import 图；6 个 `.browser.mjs` 的 `TEST_URL`
 - `remote/setup-mcp-project-locally/src/lib/engine.ts` 的常量段、`scanDoubles`、`computeLevels`、`detectAt`、`simulate` 与 `scanSide` 头部
 

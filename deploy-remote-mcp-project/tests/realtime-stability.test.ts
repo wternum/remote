@@ -121,7 +121,7 @@ function withForming(base: Candle[], close: number, now: number) {
   assert.equal(whole.gapTruncated, false, '连续历史不得误报内部缺口');
   assert.equal(whole.historyShort, true, '连续但只加载80/请求300根时必须提示历史不足');
 
-  const enough: Candle[] = Array.from({ length: 300 }, (_, i) => ({ ts: T0 + i * ms, o: 100, h: 100.4, l: 99.6, c: 100, v: 1_000_000 }));
+  const enough: Candle[] = Array.from({ length: 300 }, (_, i) => ({ ts: T0 + i * ms, o: 100, h: 100.4, l: 99.6, c: 100, v: 1_000_000, confirm: 1 }));
   const fullPrefs = { ...allOn, lookback: 300 as const };
   const complete = analyzeSignals(enough, ms, fullPrefs, null, enough.at(-1)!.ts + ms);
   assert.equal(complete.gapTruncated, false);

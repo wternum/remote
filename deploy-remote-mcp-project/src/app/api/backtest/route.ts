@@ -16,6 +16,13 @@ const BT_CACHE_MAX = 24;
 const BT_CACHE = new Map<string, { at: number; res: BacktestResult }>();
 const btBars = (bar: string) => (bar === "15m" ? 4320 : 8640); // 15m ≈ 45 天，5m ≈ 30 天
 
+/** 与 quant/stats 的口径一致：r === 0（保本被成本磨平）是 flat，不算亏损。 */
+export function persistedStatus(r: TradedSignal): "skipped" | "won" | "lost" | "time" {
+  if (r.status === "skipped") return "skipped";
+  const v = r.r ?? 0;
+  return v > 0 ? "won" : v < 0 ? "lost" : "time";
+}
+
 async function persist(recs: TradedSignal[], bar: string) {
   const rows = recs.filter((s) => s.exitTs != null || s.status === "skipped");
   for (let i = 0; i < rows.length; i += 300) {
@@ -25,7 +32,7 @@ async function persist(recs: TradedSignal[], bar: string) {
         (r) =>
           sql`(${r.id}, ${r.sym ?? ""}, ${bar}, ${r.ts}, ${r.side}, ${r.pattern},
            ${r.entry}, ${r.stop}, ${r.tp}, ${r.conf}, ${r.confl}, 'backtest',
-           ${r.status === "skipped" ? "skipped" : (r.r ?? 0) > 0 ? "won" : "lost"},
+           ${persistedStatus(r)},
            ${r.entryPrice ?? null}, ${r.exitPrice ?? null}, ${r.exitTs ?? null},
            ${r.r ?? null}, ${r.pnlPct ?? null}, ${r.holdingBars ?? null}, ${r.exitReason ?? null})`,
       ),

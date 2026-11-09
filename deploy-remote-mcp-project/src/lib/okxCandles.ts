@@ -21,6 +21,27 @@ export function isClosedCandle(c: Candle, intervalMs: number, now = Date.now(), 
   return Number.isFinite(c.ts) && c.ts + intervalMs + legacyGraceMs <= now;
 }
 
+/**
+ * 已收盘序列（输入须已按时间排序、去重）。除交易所确认的 K 线外，还保留「中间漏推
+ * confirm=1」的 K 线：它早于最新一根已确认 K 线且至少过了两个周期，只是 WS 断开错过了
+ * 收盘推送；丢掉它会在历史中间造一个假缺口，把连续段腰斩。返回保留的根数供质量提示。
+ */
+export function settledCandles<T extends Candle>(sorted: readonly T[], intervalMs: number, now = Date.now()): { candles: T[]; staleMiddleConfirm: number; forming: number } {
+  let latestConfirmedTs = -Infinity;
+  for (const c of sorted) if (isClosedCandle(c, intervalMs, now)) latestConfirmedTs = Math.max(latestConfirmedTs, c.ts);
+  const candles: T[] = [];
+  let staleMiddleConfirm = 0;
+  let forming = 0;
+  for (const c of sorted) {
+    if (isClosedCandle(c, intervalMs, now)) candles.push(c);
+    else if (c.confirm === 0 && c.ts < latestConfirmedTs && c.ts + 2 * intervalMs <= now) {
+      staleMiddleConfirm++;
+      candles.push(c);
+    } else forming++;
+  }
+  return { candles, staleMiddleConfirm, forming };
+}
+
 export function preferCandle<T extends { confirm?: 0 | 1; volumeSource?: VolumeSource }>(
   existing: T | undefined,
   incoming: T,

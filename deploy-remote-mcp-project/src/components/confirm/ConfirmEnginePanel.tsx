@@ -322,6 +322,11 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
               </span>
             </div>
             <p className="truncate text-[10px] text-[#5b6579]">双顶 / 双底二次测试 → 14 项订单流与结构证据 → 概率门槛</p>
+            {eng.market.mappedFrom && (
+              <p className="truncate text-[10px] text-[#f0b90b]" role="status">
+                图表周期 {eng.market.mappedFrom} 不在引擎支持范围（5m / 15m），本面板按 {eng.market.bar} 扫描
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-1">
             {[{ id: 'ALL', base: '全部' }, ...SYMBOLS].map(s => (
@@ -339,7 +344,7 @@ export default function ConfirmEnginePanel({ open, onClose }: { open: boolean; o
             {['5m', '15m', 'ALL'].map(b => (
               <button
                 key={b}
-                onClick={() => eng.setMarket({ ...eng.market, bar: b })}
+                onClick={() => eng.setMarket({ ...eng.market, bar: b, mappedFrom: undefined })}
                 className={`mono rounded px-1.5 py-0.5 text-[9px] transition-all ${
                   eng.market.bar === b ? 'bg-[#1a2334] text-[#e7ecf5]' : 'text-[#5b6579] hover:text-[#8c96ab]'
                 }`}

@@ -16,7 +16,7 @@ const expensive=top.map(c=>{const at=(p:number)=>100000+(p-100)*20;return {...c,
 assert.equal(scanDoubles(expensive,{...DEFAULT_PARAMS,entryMode:'confirm',trendBlock:50}).signals.filter(s=>s.pattern==='dt_reject').length,0);
 assert.ok(topSignal(expensive));
 console.log('PASS same causal M/W geometry, unaffected by trade costs');
-const untilEvent=top.slice(0,71),eventNow=top[70].ts+MS;
+const untilEvent=top.slice(0,71),eventNow=top[70].ts+MS+1500;
 const before=topSignal(untilEvent,eventNow)!;
 const future=top.map((c,i)=>i>70?{...c,v:c.v*1000,h:c.h+0.005*(i-70)}:c);
 const after=topSignal(future,NOW)!;
@@ -92,7 +92,7 @@ function breakoutFixture(): Candle[] {
 }
 const breakout = breakoutFixture();
 const q = breakout[92].ts;
-const retestAtClose = analyzeSignals(breakout.slice(0, 93), MS, prefs, null, q + MS);
+const retestAtClose = analyzeSignals(breakout.slice(0, 93), MS, prefs, null, q + MS + 1500);
 const priceRetest = retestAtClose.items.find(i => i.type === 'retest');
 assert.ok(priceRetest && priceRetest.ts === q && priceRetest.source === 'price', 'retest is a price-structure confirmation, not assumed OFI');
 assert.ok(projectSignals(retestAtClose, prefs).visible.some(i => i.type === 'retest'));
@@ -100,7 +100,7 @@ const afterFailure = analyzeSignals(breakout, MS, prefs, null, breakout.at(-1)!.
 assert.equal(afterFailure?.ts, priceRetest.ts, 'later failure cannot backdate or erase a confirmed historical event');
 const realBreakout = annotationFlow(breakout, 0.85);
 realBreakout.bars = new Map([90, 92].map(i => [breakout[i].ts, realBreakout.bars.get(breakout[i].ts)!]));
-const confirmedFlowRetest = analyzeSignals(breakout.slice(0, 93), MS, prefs, realBreakout, q + MS).items.find(i => i.type === 'retest');
+const confirmedFlowRetest = analyzeSignals(breakout.slice(0, 93), MS, prefs, realBreakout, q + MS + 1500).items.find(i => i.type === 'retest');
 assert.ok(confirmedFlowRetest?.source === 'real' && confirmedFlowRetest.detail.some(line => line.includes('仅这两根')));
 console.log('PASS first close price retest is preserved, optionally corroborated by two real taker bars');
 

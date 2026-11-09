@@ -59,6 +59,15 @@ function loadRoutes(): Promise<RouteTable> {
  * 现在：拦截器在 runtime 启动时立刻生效；路由模块与数据库都改为「首次真正用到
  * 时才加载」，纯看图场景不再下载 15.6MB WASM。
  */
+/** 不消费 body 地解析 fetch 目标；无法解析时交还原生 fetch 自己报错。 */
+export function requestUrl(input: RequestInfo | URL, base = window.location.href): URL | null {
+  try {
+    return new URL(input instanceof Request ? input.url : input instanceof URL ? input.href : String(input), base);
+  } catch {
+    return null;
+  }
+}
+
 function installFetchInterceptor() {
   const w = window as unknown as Record<string, unknown>;
   if (w[RUNTIME_FLAG]) return;
@@ -66,11 +75,14 @@ function installFetchInterceptor() {
 
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
+    // 先只解析 URL：对放行的请求构造 Request 会读掉 Request 对象的 body，
+    // 之后 nativeFetch(input, init) 必然失败（"Request object that has already been used"）。
+    const url = requestUrl(input);
+    if (!url || url.origin !== window.location.origin) return nativeFetch(input, init);
+    const stats = url.pathname.startsWith('/api/okx/');
+    if (!stats && !ROUTE_PATHS.has(url.pathname)) return nativeFetch(input, init);
     const request = new Request(input, init);
-    const url = new URL(request.url);
-    if (url.origin !== window.location.origin) return nativeFetch(input, init);
-    if (url.pathname.startsWith('/api/okx/')) return fetchStatsProxy(request, nativeFetch);
-    if (!ROUTE_PATHS.has(url.pathname)) return nativeFetch(input, init);
+    if (stats) return fetchStatsProxy(request, nativeFetch);
 
     let table: RouteTable;
     try {
@@ -80,7 +92,7 @@ function installFetchInterceptor() {
       return Response.json({ error: 'API runtime unavailable' }, { status: 503 });
     }
     const route = table[url.pathname];
-    if (!route) return nativeFetch(input, init);
+    if (!route) return nativeFetch(request);
     const handler = route[request.method];
     if (!handler) {
       return Response.json(

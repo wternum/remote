@@ -82,6 +82,7 @@ interface ProfileOptions {
   origin?: number;
   atr?: number;
   maxBins?: number;
+  quoteOnly?: boolean;
 }
 
 const validBar = (c: Candle | undefined): c is Candle => !!c &&
@@ -143,6 +144,7 @@ export function computeVaap(
   for (let i = a; i <= b; i++) {
     const c = cs[i];
     if (!validBar(c)) continue;
+    if (options.quoteOnly && c.volumeSource !== 'quote') continue;
     if (fromTs == null) fromTs = c.ts;
     toTs = c.ts;
     dataLo = Math.min(dataLo, c.l);
@@ -173,6 +175,7 @@ export function computeVaap(
   for (let i = a; i <= b; i++) {
     const c = cs[i];
     if (!validBar(c) || !(c.v > 0)) continue;
+    if (options.quoteOnly && c.volumeSource !== 'quote') continue;
     const i0 = idxOf(c.l), i1 = idxOf(c.h);
     if (c.h === c.l) {
       vols[i0] += c.v;
@@ -269,13 +272,13 @@ export function valueAreaOf(
 
 /** Disjoint early/late windows on the SAME grid and ATR denominator. */
 export function valueMigration(
-  cs: readonly Candle[], from: number, to: number, bin: number, atr?: number,
+  cs: readonly Candle[], from: number, to: number, bin: number, atr?: number, quoteOnly = false,
 ): ValueMigration | null {
   if (!Number.isFinite(from) || !Number.isFinite(to) || to - from < 11) return null;
   const split = Math.floor((from + to) / 2);
   const referenceAtr = atr != null && atr > 0 ? atr : meanTrueRange(cs, to);
-  const early = computeVaap(cs, from, split, bin, { origin: 0, atr: referenceAtr });
-  const late = computeVaap(cs, split + 1, to, bin, { origin: 0, atr: referenceAtr });
+  const early = computeVaap(cs, from, split, bin, { origin: 0, atr: referenceAtr, quoteOnly });
+  const late = computeVaap(cs, split + 1, to, bin, { origin: 0, atr: referenceAtr, quoteOnly });
   if (early.poc == null || late.poc == null || early.window.bars < 6 || late.window.bars < 6 || !(referenceAtr > 0)) return null;
   const shift = (late.poc - early.poc) / referenceAtr;
   const dir: 1 | -1 | 0 = shift > 0.15 ? 1 : shift < -0.15 ? -1 : 0;
@@ -325,7 +328,7 @@ export function findLowVolumeNodes(profile: AuctionProfile, price: number): LowV
 }
 
 /** Rolling auction context. Extension alone is deliberately NOT a directional signal. */
-export function readAuction(cs: readonly Candle[], windowBars = 120, atr?: number): AuctionRead {
+export function readAuction(cs: readonly Candle[], windowBars = 120, atr?: number, quoteOnly = false): AuctionRead {
   const n = cs.length;
   if (!n) return {
     profile: emptyProfile(0, -1, 0, 1, 0, 0), migration: null, lowVolumeNodes: [],
@@ -336,8 +339,8 @@ export function readAuction(cs: readonly Candle[], windowBars = 120, atr?: numbe
   const from = Math.max(0, n - window);
   const referenceAtr = atr != null && Number.isFinite(atr) && atr > 0 ? atr : meanTrueRange(cs, to);
   const bin = binWidthOf(cs[to].c, referenceAtr);
-  const profile = computeVaap(cs, from, to, bin, { origin: 0, atr: referenceAtr });
-  const migration = valueMigration(cs, from, to, profile.bin, referenceAtr);
+  const profile = computeVaap(cs, from, to, bin, { origin: 0, atr: referenceAtr, quoteOnly });
+  const migration = valueMigration(cs, from, to, profile.bin, referenceAtr, quoteOnly);
   const lowVolumeNodes = findLowVolumeNodes(profile, cs[to].c);
   if (profile.poc == null) return {
     profile, migration, lowVolumeNodes, regime: 'unknown',

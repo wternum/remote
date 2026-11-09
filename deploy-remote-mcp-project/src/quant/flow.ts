@@ -5,9 +5,9 @@
 //    → 按 K 线聚合成主动买入 / 主动卖出成交额（USDT），与 K 线报价币成交量同一量纲；
 //    聚合额 ≥ 85% K 线成交量才视为“完整覆盖”，否则该根仍用形态近似
 //  · rubik 统计（taker-volume-contract / open-interest-history）：每根 K 线官方主动买卖额与持仓量，
-//    但该接口不带 CORS，只在 Node / 配置了代理（localStorage pulsedesk.okx-proxy）时使用
+//    但该接口不带 CORS：Node 直连，浏览器固定走同源白名单代理 /api/okx
 // ─────────────────────────────────────────────────────────────
-import { ctValOf } from '@/lib/types';
+import { setCtVal, tryCtValOf } from '@/lib/types';
 
 export interface FlowBar {
   ts: number;
@@ -51,6 +51,8 @@ export interface FlowSnapshot {
   to: number;
   oiFrom: number;
   oiTo?: number;
+  /** rubik 官方统计写入的最后一根（不受实时 tape 影响），增量刷新的起点 */
+  rubikTo?: number;
   syncedPages?: number;
   syncedOiPages?: number;
   updatedAt: number;
@@ -115,19 +117,35 @@ function emptySnapshot(instId: string, period: string): FlowSnapshot {
   };
 }
 
-/** rubik 代理地址（无 CORS 的统计接口需要同源代理）；Node 环境直连 */
+/** rubik 代理地址（无 CORS 的统计接口固定走同源白名单代理）；Node 环境直连 */
 export function rubikBase(): string | null {
   if (typeof window === 'undefined') return REST;
-  try {
-    const v = localStorage.getItem('pulsedesk.okx-proxy');
-    if (v && /^https?:\/\//.test(v)) return v.replace(/\/$/, '');
-  } catch {
-    /* storage unavailable */
-  }
-  // Default: the app's own whitelisted proxy (src/app/api/okx/[...path]).
-  // Without it the browser only had ~8 bars of tape coverage, so historical
-  // heavy-selling/buying candles never showed real taker data.
   return `${window.location.origin}/api/okx`;
+}
+
+const ctValInflight = new Map<string, Promise<number | null>>();
+async function resolveCtVal(instId: string, signal?: AbortSignal): Promise<number | null> {
+  const known = tryCtValOf(instId);
+  if (known != null) return known;
+  const inflightReq = ctValInflight.get(instId);
+  if (inflightReq) return inflightReq;
+  const job = (async () => {
+    try {
+      const rows = (await okxGet(REST, '/api/v5/public/instruments', { instType: 'SWAP', instId }, signal)) as { ctVal?: string }[];
+      const val = Number(rows[0]?.ctVal);
+      if (Number.isFinite(val) && val > 0) {
+        setCtVal(instId, val);
+        return val;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  })().finally(() => {
+    if (ctValInflight.get(instId) === job) ctValInflight.delete(instId);
+  });
+  ctValInflight.set(instId, job);
+  return job;
 }
 
 async function okxGet(base: string, path: string, params: Record<string, string>, signal?: AbortSignal): Promise<unknown[]> {
@@ -234,52 +252,82 @@ interface Tape {
   ws: WebSocket | null;
   closed: boolean;
   snaps: Set<FlowSnapshot>;
+  owners: Set<string>;
   retry: ReturnType<typeof setTimeout> | null;
   ping: ReturnType<typeof setInterval> | null;
+  pongTimer: ReturnType<typeof setTimeout> | null;
   rollover: ReturnType<typeof setTimeout> | null;
+  attempt: number;
   /** WS 断开过：需要一次修复性回补，否则断线窗口的 K 线永久退回 K 线近似 */
   needsRepair: boolean;
 }
 const tapes = new Map<string, Tape>();
 
 /** 每个合约一条实时成交流；同一合约的多个周期快照共享 */
-function ensureTape(instId: string, snap: FlowSnapshot) {
+function ensureTape(instId: string, snap: FlowSnapshot, owner?: string) {
   let tape = tapes.get(instId);
   if (!tape) {
-    tape = { instId, ws: null, closed: false, snaps: new Set(), retry: null, ping: null, rollover: null, needsRepair: false };
+    tape = {
+      instId, ws: null, closed: false, snaps: new Set(), owners: new Set(),
+      retry: null, ping: null, pongTimer: null, rollover: null, attempt: 0, needsRepair: false,
+    };
     tapes.set(instId, tape);
     openTape(tape);
   }
+  if (owner) tape.owners.add(owner);
   tape.snaps.add(snap);
   if (snap.tape.bootstrapped && !snap.tape.connected) tape.needsRepair = true;
   return tape;
 }
 
+function clearTapeTimers(tape: Tape) {
+  if (tape.ping) { clearInterval(tape.ping); tape.ping = null; }
+  if (tape.pongTimer) { clearTimeout(tape.pongTimer); tape.pongTimer = null; }
+}
+
 function openTape(tape: Tape) {
   if (tape.closed || typeof WebSocket === 'undefined') return;
+  if (tape.retry) { clearTimeout(tape.retry); tape.retry = null; }
   let ws: WebSocket;
   try {
     ws = new WebSocket(WS_PUBLIC);
   } catch {
-    tape.retry = setTimeout(() => openTape(tape), 3000);
+    const delay = Math.min(30_000, 2000 * Math.pow(2, Math.min(4, tape.attempt++)));
+    tape.retry = setTimeout(() => openTape(tape), delay);
     return;
   }
   tape.ws = ws;
-  const ctVal = ctValOf(tape.instId);
+  if (tryCtValOf(tape.instId) == null) {
+    void resolveCtVal(tape.instId);
+  }
   ws.onopen = () => {
     if (tape.closed) { ws.close(); return; }
     ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'trades', instId: tape.instId }] }));
-    tape.ping = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('ping'), 25_000);
+    tape.ping = setInterval(() => {
+      if (tape.closed || tape.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send('ping');
+      if (!tape.pongTimer) {
+        tape.pongTimer = setTimeout(() => {
+          tape.pongTimer = null;
+          if (!tape.closed && tape.ws === ws) ws.close();
+        }, 10_000);
+      }
+    }, 25_000);
     tape.snaps.forEach(s => {
       s.tape.connected = true;
       notify(s);
     });
   };
   ws.onmessage = ev => {
-    if (tape.closed || ev.data === 'pong') return;
+    if (tape.closed) return;
+    if (tape.pongTimer) { clearTimeout(tape.pongTimer); tape.pongTimer = null; }
+    tape.attempt = 0;
+    if (ev.data === 'pong') return;
     try {
       const msg = JSON.parse(ev.data as string) as { arg?: { channel?: string }; data?: unknown[] };
       if (msg.arg?.channel !== 'trades' || !Array.isArray(msg.data)) return;
+      const ctVal = tryCtValOf(tape.instId);
+      if (ctVal == null) return;
       const trades = parseTrades(msg.data);
       for (const s of tape.snaps) {
         aggregateFlowTrades(s, trades, ctVal);
@@ -297,29 +345,34 @@ function openTape(tape: Tape) {
     }
   };
   ws.onclose = () => {
-    if (tape.ping) clearInterval(tape.ping);
-    tape.ping = null;
+    clearTapeTimers(tape);
     tape.snaps.forEach(s => {
       s.tape.connected = false;
       notify(s);
     });
-    if (!tape.closed) {
+    if (!tape.closed && tape.ws === ws) {
+      tape.ws = null;
       tape.needsRepair = true;
-      tape.retry = setTimeout(() => openTape(tape), 2000);
+      const delay = Math.min(30_000, 2000 * Math.pow(2, Math.min(4, tape.attempt++)));
+      tape.retry = setTimeout(() => openTape(tape), delay);
     }
   };
   ws.onerror = () => ws.close();
 }
 
-/** 关闭不再使用的合约成交流（切换币种时调用） */
-export function releaseTape(instId: string) {
+/** 关闭不再使用的合约成交流（按 owner 引用计数；不传 owner 则强制释放） */
+export function releaseTape(instId: string, owner?: string) {
   const tape = tapes.get(instId);
   if (!tape) return;
+  if (owner) {
+    tape.owners.delete(owner);
+    if (tape.owners.size > 0) return;
+  }
   tape.closed = true;
   tape.snaps.forEach(s => { s.tape.connected = false; notify(s); });
-  if (tape.retry) clearTimeout(tape.retry);
-  if (tape.ping) clearInterval(tape.ping);
-  if (tape.rollover) clearTimeout(tape.rollover);
+  if (tape.retry) { clearTimeout(tape.retry); tape.retry = null; }
+  clearTapeTimers(tape);
+  if (tape.rollover) { clearTimeout(tape.rollover); tape.rollover = null; }
   try {
     tape.ws?.close();
   } catch {
@@ -328,26 +381,36 @@ export function releaseTape(instId: string) {
   tapes.delete(instId);
 }
 
-/** REST 回补：从最新成交向前翻页，直到覆盖 minTs 或页数上限（10 次 / 2 秒）；每 15 页通知一次以便界面渐进刷新 */
-async function bootstrapTape(snap: FlowSnapshot, tape: Tape, minTs: number, maxPages: number, signal?: AbortSignal) {
-  const ctVal = ctValOf(snap.instId);
+/** REST 回补：从最新成交向前翻页，直到覆盖 minTs 或页数上限（10 次 / 2 秒）；返回是否完整覆盖目标时间 */
+async function bootstrapTape(snap: FlowSnapshot, tape: Tape, minTs: number, maxPages: number, signal?: AbortSignal): Promise<boolean> {
+  const ctVal = await resolveCtVal(snap.instId, signal);
+  if (ctVal == null) return false;
   let after: number | undefined;
+  let completed = maxPages <= 0;
   for (let p = 0; p < maxPages; p++) {
-    if (signal?.aborted || tape.closed) return;
+    if (signal?.aborted || tape.closed) return false;
     const params: Record<string, string> = { instId: snap.instId, limit: String(PAGE), type: '1' };
     if (after) params.after = String(after);
     const rows = await okxGet(REST, '/api/v5/market/history-trades', params, signal);
     const trades = parseTrades(rows);
-    if (!trades.length) break;
-    if (signal?.aborted || tape.closed) return;
+    if (!trades.length) {
+      completed = true;
+      break;
+    }
+    if (signal?.aborted || tape.closed) return false;
     aggregateFlowTrades(snap, trades, ctVal);
     const oldest = trades.reduce((m, t) => (t.tradeId < m.tradeId ? t : m), trades[0]);
     after = oldest.tradeId;
-    if (oldest.ts <= minTs) break;
+    if (oldest.ts <= minTs) {
+      completed = true;
+      break;
+    }
     if (p % 15 === 14) notify(snap);
     await sleep(220);
   }
+  if (signal?.aborted || tape.closed) return false;
   snap.tape.bootstrapped = true;
+  return completed;
 }
 
 const MAX_FLOW_BARS = 12_000;
@@ -361,21 +424,30 @@ function trimFlowBars(snap: FlowSnapshot) {
 }
 
 // ─── rubik 官方统计（需直连或代理） ───────────────────────────
+/** 离线追补上限：与首次回填同量级（约 1400 根），避免一次刷新变成无界翻页 */
+export const MAX_CATCHUP_PAGES = 14;
+
+/** 从上次写入的最后一根补到现在所需页数（含 1 页重叠），不少于调用方给的页数 */
+export function catchUpPages(lastTs: number, barMs: number, minPages: number, now = Date.now()): number {
+  const missing = Math.max(0, Math.ceil((now - lastTs) / barMs));
+  return Math.max(minPages, Math.min(MAX_CATCHUP_PAGES, Math.ceil(missing / PAGE) + 1));
+}
+
 async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPages: number, oiPages: number, signal?: AbortSignal) {
   const { instId, period } = snap;
-  // 若已按同等或更深页数完整回填过，热刷新只需补齐 snap.to 之后的新收盘根（通常 1 页）
-  const takerStopTs =
-    snap.rubikComplete && (snap.syncedPages ?? 0) >= maxPages && snap.to > 0
-      ? Math.max(minTs, snap.to - snap.barMs)
-      : minTs;
-  const oiStopTs =
-    snap.rubikComplete && (snap.syncedOiPages ?? 0) >= oiPages && (snap.oiTo ?? 0) > 0
-      ? Math.max(minTs, snap.oiTo! - snap.barMs)
-      : Math.max(minTs, snap.from);
+  // 增量刷新必须以 rubik 自己写到的最后一根为界：snap.to 也会被实时 tape 推到当前时间，
+  // 用它当停止点会让长时间离线（睡眠/断网）期间的 K 线永远不再回填。
+  // 调用方要求比上次更深的历史时仍做完整回填。
+  const takerIncremental = !!snap.rubikComplete && (snap.rubikTo ?? 0) > 0 && (snap.syncedPages ?? 0) >= maxPages;
+  const oiIncremental = !!snap.rubikComplete && (snap.oiTo ?? 0) > 0 && (snap.syncedOiPages ?? 0) >= oiPages;
+  const takerStopTs = takerIncremental ? Math.max(minTs, snap.rubikTo! - snap.barMs) : minTs;
+  const oiStopTs = oiIncremental ? Math.max(minTs, snap.oiTo! - snap.barMs) : Math.max(minTs, snap.from);
+  const takerPages = takerIncremental ? catchUpPages(snap.rubikTo!, snap.barMs, maxPages) : maxPages;
+  const oiPageBudget = oiIncremental ? catchUpPages(snap.oiTo!, snap.barMs, oiPages) : oiPages;
 
   const syncTaker = async () => {
     let end: number | undefined;
-    for (let pages = 0; pages < maxPages; pages++) {
+    for (let pages = 0; pages < takerPages; pages++) {
       const params: Record<string, string> = { instId, period, unit: '2', limit: String(PAGE) };
       if (end) params.end = String(end);
       const rows = (await okxGet(base, '/api/v5/rubik/stat/taker-volume-contract', params, signal)) as string[][];
@@ -403,17 +475,18 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
         snap.bars.set(ts, { ts, buy, sell, oiContracts: prev?.oiContracts, oiUsd: prev?.oiUsd, src: 'rubik' });
         snap.from = Math.min(snap.from, ts);
         snap.to = Math.max(snap.to, ts);
+        snap.rubikTo = Math.max(snap.rubikTo ?? 0, ts);
       }
       if (!nonZero || !Number.isFinite(oldest) || oldest <= takerStopTs) break;
       end = oldest;
-      if (pages + 1 < maxPages) await sleep(410);
+      if (pages + 1 < takerPages) await sleep(410);
     }
     snap.syncedPages = Math.max(snap.syncedPages ?? 0, maxPages);
   };
 
   const syncOi = async () => {
     let oiEnd: number | undefined;
-    for (let p = 0; p < oiPages; p++) {
+    for (let p = 0; p < oiPageBudget; p++) {
       const params: Record<string, string> = { instId, period, limit: String(PAGE) };
       if (oiEnd) params.end = String(oiEnd);
       const rows = (await okxGet(base, '/api/v5/rubik/stat/contracts/open-interest-history', params, signal)) as string[][];
@@ -445,7 +518,7 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
       const stop = oiStopTs > 0 ? oiStopTs : Math.max(minTs, snap.from);
       if (!Number.isFinite(oldest) || oldest <= stop) break;
       oiEnd = oldest;
-      if (p + 1 < oiPages) await sleep(410);
+      if (p + 1 < oiPageBudget) await sleep(410);
     }
     snap.syncedOiPages = Math.max(snap.syncedOiPages ?? 0, oiPages);
   };
@@ -462,20 +535,26 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
 export function syncFlow(
   instId: string,
   period: string,
-  opts: { minTs: number; maxPages?: number; oiPages?: number; bootstrapPages?: number; bootstrapBars?: number; signal?: AbortSignal },
+  opts: { minTs: number; maxPages?: number; oiPages?: number; bootstrapPages?: number; bootstrapBars?: number; signal?: AbortSignal; owner?: string },
 ): Promise<FlowSnapshot> {
   const key = flowKey(instId, period);
   const running = inflight.get(key);
   // 已被中止的任务不能再当作「正在同步」复用：releaseTape 会关掉并删除实时成交流，
   // 若继续等待旧任务（最多 300 页回补）自行结束，重新开启标注后成交流会长时间不重连，
   // 侧栏一直停在「等待成交流」，所有订单流类标注拿不到真实覆盖。
-  if (running && !running.signal?.aborted) return running.promise;
+  if (running && !running.signal?.aborted) {
+    if (typeof window !== 'undefined' && opts.owner) {
+      const snap = cache.get(key);
+      if (snap) ensureTape(instId, snap, opts.owner);
+    }
+    return running.promise;
+  }
   const job = (async () => {
     const snap = cache.get(key) ?? emptySnapshot(instId, period);
     cache.set(key, snap);
     if (opts.signal?.aborted) return snap;
     // Establish the live connection before waiting for paginated historical statistics.
-    const liveTape = typeof window !== 'undefined' ? ensureTape(instId, snap) : null;
+    const liveTape = typeof window !== 'undefined' ? ensureTape(instId, snap, opts.owner) : null;
     const base = rubikBase();
     try {
       // 失败冷却：无代理的静态环境里 rubik 恒失败，避免每 30s 重复全量翻页空转。
@@ -499,11 +578,18 @@ export function syncFlow(
       if (liveTape) {
         const tape = liveTape;
         if (snap.tape.bootstrapped && shouldRepairFlow(snap, tape.needsRepair)) {
-          // 断线 / 快照滞后：只回补最近 2 根（页数封顶），补齐缺口而不是重做全量回填
-          const repairMin = Math.floor(Date.now() / snap.barMs) * snap.barMs - 2 * snap.barMs;
-          await bootstrapTape(snap, tape, repairMin, 24, opts.signal);
-          tape.needsRepair = false;
-          snap.repairedAt = Date.now();
+          // 断线 / 快照滞后：尽量覆盖到上次最新根（上限 12 根、48 页），未真正覆盖目标时间前不清除 needsRepair
+          const now = Date.now();
+          const curBar = Math.floor(now / snap.barMs) * snap.barMs;
+          const repairMin = Math.min(
+            curBar - 2 * snap.barMs,
+            Math.max(snap.to > 0 ? snap.to - snap.barMs : curBar - 2 * snap.barMs, curBar - 12 * snap.barMs),
+          );
+          const repaired = await bootstrapTape(snap, tape, repairMin, 48, opts.signal);
+          if (!opts.signal?.aborted && !tape.closed) {
+            snap.repairedAt = Date.now();
+            if (repaired) tape.needsRepair = false;
+          }
         }
         if (!snap.tape.bootstrapped) {
           // 若 rubik 已回填历史已收盘 K 线，逐笔回补只需覆盖形成中及刚收盘的 2 根；

@@ -31,18 +31,34 @@ registerAnnotLayers();
 registerSessionLayers();
 registerFrameworkMarking();
 
-/** Remove retired audit-panel references from old persisted layouts before Vela restores them. */
+const isSupportedChartSymbol = (raw?: string) => {
+  const ticker = (raw ?? '').replace(/^okx:/i, '');
+  return /^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker);
+};
+
+/** Remove retired audit-panel references and unsupported symbols from persisted layouts before Vela restores them. */
 export function workspaceStorage() {
   const base = localStorageAdapter('pulsedesk-vela-workspace');
   const clean = (raw: string | null): string | null => {
     if (!raw) return raw;
     try {
       const state = decodeState(raw);
-      if (!state?.panels) return raw;
+      if (!state) return raw;
       let changed = false;
-      if (state.panels.open === 'pulsedesk-price-action') { delete state.panels.open; changed = true; }
-      if (state.panels.pinned?.includes('pulsedesk-price-action')) { state.panels.pinned = state.panels.pinned.filter(id => id !== 'pulsedesk-price-action'); changed = true; }
-      if (state.panels.widths && 'pulsedesk-price-action' in state.panels.widths) { delete state.panels.widths['pulsedesk-price-action']; changed = true; }
+      if (state.panels) {
+        if (state.panels.open === 'pulsedesk-price-action') { delete state.panels.open; changed = true; }
+        if (state.panels.pinned?.includes('pulsedesk-price-action')) { state.panels.pinned = state.panels.pinned.filter(id => id !== 'pulsedesk-price-action'); changed = true; }
+        if (state.panels.widths && 'pulsedesk-price-action' in state.panels.widths) { delete state.panels.widths['pulsedesk-price-action']; changed = true; }
+      }
+      if (Array.isArray(state.charts)) {
+        for (const c of state.charts) {
+          if (c.symbol && !isSupportedChartSymbol(c.symbol)) {
+            c.symbol = 'okx:BTC-USDT-SWAP';
+            c.provider = 'okx';
+            changed = true;
+          }
+        }
+      }
       return changed ? encodeState(state) : raw;
     } catch { return raw; }
   };
@@ -78,7 +94,7 @@ export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe =
     let unhoverMenus: (() => void) | null = null;
     let unsync: (() => void) | null = null;
     let stopEnhancingDrawings: (() => void) | null = null;
-    let symbolGuard = 0;
+    let offMarketGuard: (() => void) | null = null;
     try {
       ws = new VelaWorkspace(host, {
         layout: false,
@@ -111,17 +127,18 @@ export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe =
       stopEnhancingDrawings = enhanceDrawingMenus(ws.root);
       unhover = installQuantHover(ws.root);
       unhoverMenus = installToolbarHover(ws.root);
-      // The picker is limited to BTC/ETH/SOL; a persisted removed symbol falls back to BTC.
-      symbolGuard = window.setTimeout(() => {
+      const enforceSupportedSymbol = () => {
         try {
-          const base = (ws?.chart.market.symbol ?? '').replace(/^okx:/i, '').split('-')[0].toUpperCase();
-          if (base && !['BTC', 'ETH', 'SOL'].includes(base)) {
+          const cur = ws?.chart.market.symbol;
+          if (cur && !isSupportedChartSymbol(cur)) {
             void ws?.chart.setMarket({ symbol: 'okx:BTC-USDT-SWAP' });
           }
         } catch {
-          /* Market not ready: the next load keeps the provider's default. */
+          /* ignore */
         }
-      }, 1600);
+      };
+      enforceSupportedSymbol();
+      offMarketGuard = ws.chart.on('market:changed', enforceSupportedSymbol);
       // 顶栏按钮显示当前周期 / 样式值
       unsync = syncTopbarLabels(ws.root, ws);
       onReady?.(ws);
@@ -129,7 +146,7 @@ export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe =
       console.error('VelaWorkspace 初始化失败', e);
     }
     return () => {
-      window.clearTimeout(symbolGuard);
+      offMarketGuard?.();
       unhoverMenus?.();
       stopEnhancingDrawings?.();
       unhover?.();

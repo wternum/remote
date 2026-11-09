@@ -52,18 +52,19 @@ const incomplete = annotationFlow(top); incomplete.bars.forEach(b => { b.buy *= 
 assert.ok(projectSignals(analyzeSignals(top, ms, prefs, incomplete, now), prefs).visible.every(i => i.source === 'price'));
 console.log('PASS missing/partial flow cannot masquerade as covered taker data');
 
-const previewTime = top[78].ts + 1000;
-const beforeClose = analyzeSignals(top.slice(0, 79), ms, prefs, annotationFlow(top), previewTime);
+const previewTime = top[78].ts + 2000;
+const formingSlice = top.slice(0, 79);
+const beforeClose = analyzeSignals(formingSlice, ms, prefs, annotationFlow(top), previewTime);
 assert.ok(!beforeClose.items.some(i => i.type === 'deltaImpulse' && i.ts === top[78].ts));
 const previewPrefs = { ...prefs, preview: true };
-const live = analyzeSignals(top.slice(0, 79), ms, previewPrefs, annotationFlow(top), previewTime);
+const live = analyzeSignals(formingSlice, ms, previewPrefs, annotationFlow(top), previewTime);
 assert.ok(live.items.some(i => i.type === 'deltaImpulse' && i.ts === top[78].ts && !i.confirmed));
 const neutral = annotationFlow(top);
 neutral.bars.set(top[78].ts, { ts: top[78].ts, buy: 1_750_000, sell: 1_750_000, src: 'tape' });
-assert.ok(!analyzeSignals(top.slice(0, 79), ms, previewPrefs, neutral, previewTime).items.some(i => i.type === 'deltaImpulse' && i.ts === top[78].ts));
+assert.ok(!analyzeSignals(formingSlice, ms, previewPrefs, neutral, previewTime).items.some(i => i.type === 'deltaImpulse' && i.ts === top[78].ts));
 console.log('PASS forming-bar previews are opt-in and disappear when the condition reverses');
 
-const atConfirmation = analyzeSignals(top.slice(0, 71), ms, prefs, annotationFlow(top), top[70].ts + ms);
+const atConfirmation = analyzeSignals(top.slice(0, 71), ms, prefs, annotationFlow(top), top[70].ts + ms + 1500);
 assert.ok(atConfirmation.items.some(i => i.type === 'doubleTop'));
 const stableBefore = atConfirmation.items.filter(i => i.type === 'doubleTop').map(i => ({ origin: i.story!.origin, evidence: i.story!.evidence, path: i.path }));
 const stableAfter = analysis.items.filter(i => i.type === 'doubleTop').map(i => ({ origin: i.story!.origin, evidence: i.story!.evidence, path: i.path }));

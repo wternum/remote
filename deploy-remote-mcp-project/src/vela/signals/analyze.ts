@@ -1,4 +1,5 @@
 import type { Candle } from '@/lib/types';
+import { isClosedCandle, preferCandle, settledCandles } from '@/lib/okxCandles';
 import { buildContext } from '@/quant/context';
 import type { FlowSnapshot } from '@/quant/flow';
 import { findSwingLevels, readBreakout } from '@/quant/orderflow';
@@ -35,8 +36,14 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
     [c.ts, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite) && c.ts <= now && c.v >= 0 &&
     c.o > 0 && c.c > 0 && c.h >= Math.max(c.o, c.c) && c.l <= Math.min(c.o, c.c) && c.l > 0,
   ).sort((a, b) => a.ts - b.ts);
-  const chronological = [...new Map(valid.map(c => [c.ts, c])).values()];
-  const closed = chronological.filter(c => c.ts + barMs <= now);
+  const byTs = new Map<number, Candle>();
+  for (const c of valid) {
+    const old = byTs.get(c.ts);
+    byTs.set(c.ts, preferCandle(old, c, old?.v ?? 0, c.v, isClosedCandle(c, barMs, now)));
+  }
+  const chronological = [...byTs.values()];
+  // 与四框架同一口径：中间漏推 confirm=1 的 K 线不能被当成历史缺口截断连续段
+  const closed = settledCandles(chronological.filter(c => c.ts < now), barMs, now).candles;
   // Crypto trades continuously. A missing historical K line must not be treated
   // as an ordinary one-bar pause when testing swing age, breakouts or CVD.
   let contiguousStart = closed.length ? closed.length - 1 : 0;
@@ -45,8 +52,8 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   const inScope = cs.slice(-preferences.lookback);
   const newest = chronological.at(-1);
   const lastPrice = newest?.c ?? 0;
-  // 形成中 K 线只用于盘中预警；所有形态判定仍用上面过滤出的 closed。
-  const forming = cs.length > 0 && newest && newest.ts === cs[cs.length - 1].ts + barMs && newest.ts + barMs > now
+  // 形成中 K 线只用于盘中预警；confirm 优先于本机时钟
+  const forming = cs.length > 0 && newest && newest.ts === cs[cs.length - 1].ts + barMs && !isClosedCandle(newest, barMs, now)
     ? newest : undefined;
   if (cs.length < 30) {
     const gapTruncated = contiguousStart > 0 && inScope.length < preferences.lookback;
@@ -73,15 +80,25 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   // 远离现价的历史摆动不该挤占当前右侧价格轨道；仍只依据已收盘 K 线。
   const levelReach = Math.max(3 * (ctx.atr.at(-1) ?? 0), current * 0.012);
   const levelGap = Math.max(0.6 * (ctx.atr.at(-1) ?? 0), current * 0.002);
-  const levels: typeof swings = [];
-  for (const lv of swings
+  // 同一侧、几乎同一价位的摆动位只保留更极端（支撑取更低、阻力取更高）或更早的锚点，
+  // 避免后续在同区形成的较浅回踩把真正的外沿关键位挤掉，再按距现价由近到远选取最多 6 条。
+  const levelCandidates = swings
     .filter(l => l.breakIdx === null && ctx.n - 1 - l.idx <= 288 && Math.abs(l.price - current) <= levelReach)
-    .sort((a, b) => Math.abs(a.price - current) - Math.abs(b.price - current))) {
-    // 同一侧、几乎同一价位的摆动位只画一条，避免 93.65/93.85/93.91 三条线叠在一起。
-    if (levels.some(k => k.side === lv.side && Math.abs(k.price - lv.price) <= levelGap)) continue;
-    levels.push(lv);
-    if (levels.length >= 6) break;
+    .sort((a, b) => a.idx - b.idx);
+  const dedupedLevels: typeof swings = [];
+  for (const lv of levelCandidates) {
+    const existingIdx = dedupedLevels.findIndex(k => k.side === lv.side && Math.abs(k.price - lv.price) <= levelGap);
+    if (existingIdx >= 0) {
+      const ex = dedupedLevels[existingIdx];
+      const moreExtreme = lv.side === 'top' ? lv.price > ex.price : lv.price < ex.price;
+      if (moreExtreme) dedupedLevels[existingIdx] = lv;
+    } else {
+      dedupedLevels.push(lv);
+    }
   }
+  const levels = dedupedLevels
+    .sort((a, b) => Math.abs(a.price - current) - Math.abs(b.price - current))
+    .slice(0, 6);
   for (const lv of levels) {
     const top = lv.side === 'top';
     const tone = top ? 'top' : 'bottom';
@@ -149,7 +166,7 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   const flowMarks: { item: SignalItem; score: number; idx: number }[] = [];
   for (let i = Math.max(20, deltaCtx.n - preferences.lookback); i < deltaCtx.n; i++) {
     const candle = deltaCtx.cs[i];
-    const confirmed = candle.ts + barMs <= now;
+    const confirmed = candle.ts < now && isClosedCandle(candle, barMs, now);
     const real = deltaCtx.real[i] === 1;
     const fb = flow?.bars.get(candle.ts);
     const denominator = real && fb ? fb.buy + fb.sell : candle.v;
@@ -220,7 +237,13 @@ export function analyzeSignals(candles: Candle[], barMs: number, preferences: Si
   // First confirmed price retest. Re-evaluate at each then-known close; never
   // backdate a later hold to an earlier bar. Real flow is optional corroboration,
   // not a prerequisite for a PRICE-STRUCTURE retest annotation.
-  const broken = swings.filter(l => l.breakIdx !== null && cs[l.breakIdx].ts >= cutoff).slice(-24);
+  const brokenByBarSide = new Map<string, (typeof swings)[number]>();
+  for (const l of swings) {
+    if (l.breakIdx !== null && cs[l.breakIdx].ts >= cutoff) {
+      brokenByBarSide.set(`${l.breakIdx}:${l.side}`, l);
+    }
+  }
+  const broken = [...brokenByBarSide.values()].slice(-24);
   for (const lv of broken) {
     const b = lv.breakIdx!;
     const end = Math.min(ctx.n - 1, b + 48);

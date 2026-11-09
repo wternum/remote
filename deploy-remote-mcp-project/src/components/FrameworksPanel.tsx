@@ -3,6 +3,7 @@ import { Crosshair, RefreshCw, X } from 'lucide-react';
 import type { FrameworkReport } from '@/quant/frameworks';
 import { decimalsFor } from '@/vela/annotTypes';
 import { getFrameworkMarkStore } from '@/vela/frameworkMarkStore';
+import { barsHub } from '@/vela/okxProvider';
 import { useFrameworks } from './frameworks/useFrameworks';
 import './frameworks/frameworks.css';
 
@@ -94,6 +95,8 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
   const markStore = getFrameworkMarkStore();
   const markPrefs = useSyncExternalStore(markStore.subscribe, markStore.getSnapshot, markStore.getSnapshot);
   const { market, report, status, message, updatedAt } = live;
+  // Surface an incomplete REST history page instead of silently shrinking the lookback.
+  const hubStatus = report ? barsHub.status(report.symbol, market.tf) : undefined;
 
   useEffect(() => {
     if (!open) return;
@@ -180,6 +183,11 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
               </div>
               {criticalIssues.length > 0 && (
                 <div className="fw-note">数据边界：{criticalIssues.join('；')}。</div>
+              )}
+              {hubStatus?.incomplete && (
+                <div className="fw-note">
+                  历史分页不完整（{hubStatus.reason ?? '上游分页失败'}）：结构标注只使用已加载的连续段，回看范围可能变短。
+                </div>
               )}
 
               <div className="fw-block">

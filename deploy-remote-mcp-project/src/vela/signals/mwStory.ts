@@ -111,8 +111,11 @@ export function analyzeMwStory(input: MwStoryInput): SignalItem {
       retestVolume = cs[line.acceptedAt].v > 0 ? cs[rIdx].v / cs[line.acceptedAt].v : null;
       let extreme = line.price;
       for (let i = line.acceptedAt; i <= line.reachedIdx; i++) extreme = up ? Math.max(extreme, cs[i].h) : Math.min(extreme, cs[i].l);
+      // 回撤深度按回踩区间的真实价格极值（影线）度量，避免长影线被收盘价掩盖
+      let pullExt = up ? cs[line.reachedIdx].l : cs[line.reachedIdx].h;
+      for (let i = line.reachedIdx; i <= rIdx; i++) pullExt = up ? Math.min(pullExt, cs[i].l) : Math.max(pullExt, cs[i].h);
       const span = Math.max(Math.abs(extreme - line.price), 1.5 * Math.max(atr[line.acceptedAt] || a, 1e-9));
-      retestDepth = Math.max(0, Math.min(1, line.dir * (extreme - cs[rIdx].c) / span));
+      retestDepth = Math.max(0, Math.min(1, line.dir * (extreme - pullExt) / span));
     }
     if (line.kind === 'level' && invalidated) pathLines.push(`原${name}方向已被关键位突破否定；此处跟踪${up ? '向上' : '向下'}突破的${back}，不是原形态继续成立。`);
     if (line.acceptedAt >= 0) {
@@ -260,9 +263,10 @@ export function analyzeMwStory(input: MwStoryInput): SignalItem {
   const zlo = line?.lo ?? p.level - tol, zhi = line?.hi ?? p.level + tol;
   const zstart = line ? cs[line.firstBreak].ts : cs[p.second].ts;
   const endTs = phase === 'break-failed' || phase === 'expired' || phase === 'target-reached' ? cs[activityIdx].ts + barMs : cs[last].ts + barMs;
+  const confirmed = phase !== 'break-pending' && cs[p.idx].confirm !== 0;
   return { id, type: top ? 'doubleTop' : 'doubleBottom', ts: cs[activityIdx].ts, fromTs: cs[anchorFirst].ts,
     price: p.level, title: `${name} ${price(p.level)} · ${label}`, detail: sections.flatMap(s => [s.title, ...s.lines]),
-    source: 'price', confirmed: true, tone, story,
+    source: 'price', confirmed, tone, story,
     event: { id: `${id}:event`, ts: cs[activityIdx].ts, side: (bias ?? side(rev)) === 'long' ? 'below' : 'above', tone,
       text: `${top ? 'M' : 'W'} ${label}`, marker: 'diamond', priority: 96, title: `${name} · ${label}`, detail: shortDetails },
     levels: [

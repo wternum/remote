@@ -102,6 +102,8 @@ const emptyPayload = (decimals = 2): AnnPayload => ({
 });
 
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
+const fmtUtc = (ts: number | null | undefined) =>
+  ts != null && Number.isFinite(ts) ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC' : '—';
 
 export function projectFrameworkMarks(
   report: FrameworkReport | null,
@@ -138,9 +140,11 @@ export function projectFrameworkMarks(
   // 1. AMT reference levels (strictly requires exchange quote turnover).
   const prof = report.auction.profile;
   if (prefs.amt && report.quality.auctionVolumeReady && prof.poc != null && prof.vah != null && prof.val != null) {
-    const fromTs = prof.window.fromTs ?? report.lastTs;
+    // Anchor rolling levels at report.lastTs (where the rolling window completed),
+    // not retrospectively back at window.fromTs.
+    const fromTs = report.lastTs;
     const mig = report.auction.migration;
-    const amtCommon = `滚动 ${prof.window.bars} 根 OHLC quote 成交额近似 · 价值区宽 ${prof.valueWidthAtr.toFixed(1)} ATR`;
+    const amtCommon = `最近 ${prof.window.bars} 根（${fmtUtc(prof.window.fromTs)}–${fmtUtc(prof.window.toTs)}）滚动 quote 成交额近似，非交易日锚定 · 价值区宽 ${prof.valueWidthAtr.toFixed(1)} ATR`;
     levels.push({
       id: 'fw:amt:poc',
       price: prof.poc,
@@ -193,7 +197,7 @@ export function projectFrameworkMarks(
       levels.push({
         id: 'fw:liq:above',
         price: nearestAbove.price,
-        fromTs: nearestAbove.firstTs,
+        fromTs: nearestAbove.confirmedTs,
         toTs: null,
         tone: 'top',
         name: nearestAbove.equal ? `上等高×${nearestAbove.touches}` : '前高参考',
@@ -202,7 +206,8 @@ export function projectFrameworkMarks(
         priority: nearestAbove.equal ? 80 : 62,
         label: prefs.labels,
         detail: [
-          `${nearestAbove.equal ? `上方等高流动性池（${nearestAbove.touches} 个摆动参考）` : '上方最近已确认摆动高点'} · ${fmt(nearestAbove.price)}`,
+          `${nearestAbove.equal ? `上方等高流动性池（${nearestAbove.touches} 个未破摆动参考）` : '上方最近已确认摆动高点'} · ${fmt(nearestAbove.price)}`,
+          `极值棒 ${fmtUtc(nearestAbove.firstTs)} · 右侧 5 根确认于 ${fmtUtc(nearestAbove.confirmedTs + barMs)}（此前时刻线尚不存在）`,
           `距收盘 ${nearestAbove.distanceAtr.toFixed(1)} ATR · ${nearestAbove.active ? '尚未被收盘击穿' : '此前曾被击穿'}`,
           '公共行情无法观测真实止损挂单位置，仅供结构参考。',
         ],
@@ -212,7 +217,7 @@ export function projectFrameworkMarks(
       levels.push({
         id: 'fw:liq:below',
         price: nearestBelow.price,
-        fromTs: nearestBelow.firstTs,
+        fromTs: nearestBelow.confirmedTs,
         toTs: null,
         tone: 'bottom',
         name: nearestBelow.equal ? `下等低×${nearestBelow.touches}` : '前低参考',
@@ -221,7 +226,8 @@ export function projectFrameworkMarks(
         priority: nearestBelow.equal ? 80 : 62,
         label: prefs.labels,
         detail: [
-          `${nearestBelow.equal ? `下方等低流动性池（${nearestBelow.touches} 个摆动参考）` : '下方最近已确认摆动低点'} · ${fmt(nearestBelow.price)}`,
+          `${nearestBelow.equal ? `下方等低流动性池（${nearestBelow.touches} 个未破摆动参考）` : '下方最近已确认摆动低点'} · ${fmt(nearestBelow.price)}`,
+          `极值棒 ${fmtUtc(nearestBelow.firstTs)} · 右侧 5 根确认于 ${fmtUtc(nearestBelow.confirmedTs + barMs)}（此前时刻线尚不存在）`,
           `距收盘 ${nearestBelow.distanceAtr.toFixed(1)} ATR · ${nearestBelow.active ? '尚未被收盘击穿' : '此前曾被击穿'}`,
           '公共行情无法观测真实止损挂单位置，仅供结构参考。',
         ],
@@ -330,8 +336,7 @@ export function projectFrameworkMarks(
     }
   }
 
-  // 4. Current-TF confirmed Williams fractals (max 2 highs + 2 lows) + compact MTF HUD.
-  let hud: FrameworkHud | null = null;
+  // 4. Current-TF confirmed Williams fractals (max 2 highs + 2 lows).
   if (prefs.fractals) {
     const baseRow = report.mtf.rows[0];
     if (baseRow && !baseRow.insufficient) {
@@ -351,37 +356,38 @@ export function projectFrameworkMarks(
           title: `${REL_DESC[p.rel]} · ${fmt(p.price)}`,
           detail: [
             `当前周期 (${baseRow.tf}) 已确认 Williams 分形`,
-            `右侧 2 根收盘后确认，无未来函数回溯。`,
+            `标于极值棒 (${fmtUtc(p.ts)})，实际于 ${fmtUtc(p.confirmedAt)}（右侧 2 根收盘后）才成立；该时刻前不可见。`,
           ],
         });
       }
     }
-
-    const hudVerdict: FrameworkHud['verdict'] =
-      report.confluence.verdict === 'long' || report.confluence.verdict === 'lean_long'
-        ? '偏多'
-        : report.confluence.verdict === 'short' || report.confluence.verdict === 'lean_short'
-          ? '偏空'
-          : '中性';
-    const hudTone: AnnTone = hudVerdict === '偏多' ? 'long' : hudVerdict === '偏空' ? 'short' : 'neck';
-    hud = {
-      rows: report.mtf.rows.map(r => ({
-        tf: r.tf,
-        bias: r.bias,
-        insufficient: r.insufficient,
-        arrow: r.insufficient ? '—' : r.bias === 'bull' ? '↑' : r.bias === 'bear' ? '↓' : '—',
-      })),
-      verdict: hudVerdict,
-      tone: hudTone,
-      phase: PHASE_TEXT[report.wyckoff.phase] ?? '未知',
-      title: `多周期对齐 & 四框架汇总 · ${hudVerdict}`,
-      detail: [
-        report.mtf.headline,
-        `Wyckoff 阶段：${PHASE_TEXT[report.wyckoff.phase] ?? report.wyckoff.phase}`,
-        report.confluence.headline,
-      ],
-    };
   }
+
+  // 5. Compact MTF + 4-framework summary HUD (independent of fractal candle markers toggle).
+  const hudVerdict: FrameworkHud['verdict'] =
+    report.confluence.verdict === 'long' || report.confluence.verdict === 'lean_long'
+      ? '偏多'
+      : report.confluence.verdict === 'short' || report.confluence.verdict === 'lean_short'
+        ? '偏空'
+        : '中性';
+  const hudTone: AnnTone = hudVerdict === '偏多' ? 'long' : hudVerdict === '偏空' ? 'short' : 'neck';
+  const hud: FrameworkHud = {
+    rows: report.mtf.rows.map(r => ({
+      tf: r.tf,
+      bias: r.bias,
+      insufficient: r.insufficient,
+      arrow: r.insufficient ? '—' : r.bias === 'bull' ? '↑' : r.bias === 'bear' ? '↓' : '—',
+    })),
+    verdict: hudVerdict,
+    tone: hudTone,
+    phase: PHASE_TEXT[report.wyckoff.phase] ?? '未知',
+    title: `多周期对齐 & 四框架汇总 · ${hudVerdict}`,
+    detail: [
+      report.mtf.headline,
+      `Wyckoff 阶段：${PHASE_TEXT[report.wyckoff.phase] ?? report.wyckoff.phase}`,
+      report.confluence.headline,
+    ],
+  };
 
   return {
     payload: {

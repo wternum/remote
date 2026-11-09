@@ -7,6 +7,7 @@ import {
   type AsiaSweepState, type SessionDefinition, type SessionMode,
 } from '../sessions/sessionMath';
 import { getSessionStore, type SessionStore } from '../sessions/sessionStore';
+import { MARKERS_ENABLED } from './runtime';
 
 function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: () => void }) {
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`sa-switch ${checked ? 'is-on' : ''}`} onClick={onChange}><span className="sa-switch-track"><span /></span></button>;
@@ -69,7 +70,7 @@ export default function SignalPanel({ store }: { store: SignalStore; ctx: Widget
   const toggle = (id: SessionDefinition['id']) => { if (id === 'asia' || id === 'london' || id === 'ny') sessionStore.toggleSession(id); else sessionStore.patch({ showOverlap: !sp.showOverlap }); };
   const asia = summary.latestAsia;
   const decimals = asia ? asia.high >= 1000 ? 1 : asia.high >= 10 ? 2 : 3 : 2;
-  const status = !prefs.enabled ? '观察关闭' : state.status === 'loading' ? '载入行情' : state.status === 'error' ? '等待数据' : '收盘跟踪';
+  const status = MARKERS_ENABLED && !prefs.enabled ? '观察关闭' : state.status === 'loading' ? '载入行情' : state.status === 'error' ? '等待数据' : '收盘跟踪';
   const layers = [
     ['showBands', '背景', '时段底色'], ['showBadges', '标签', '中文时段标记'], ['showAsiaRange', '锚点', '亚太交易时段高低点'],
     ['showDailyOpen', '日界', '零点分割线'], ['showOverlap', '重叠', '重叠窗口'],
@@ -105,7 +106,7 @@ export default function SignalPanel({ store }: { store: SignalStore; ctx: Widget
       <section className="sx-section" aria-label="图层要素">
         <div className="sx-section-head"><h3>图层要素</h3><button type="button" className="sx-reset" onClick={() => sessionStore.reset()} title="恢复默认时段设置"><RotateCcw size={12} />重置</button></div>
         <div className="sx-layer-grid">{layers.map(([key, label, title]) => <button type="button" key={key} className={sp[key] ? 'is-active' : ''} aria-pressed={sp[key]} title={title} onClick={() => sessionStore.patch({ [key]: !sp[key] })}><i />{label}</button>)}</div>
-        <div className="sx-signal-toggle"><span>双顶 / 双底观察</span><Toggle checked={prefs.enabled} label="显示信号标注" onChange={() => store.patch({ enabled: !prefs.enabled })} /></div>
+        {MARKERS_ENABLED && <div className="sx-signal-toggle"><span>双顶 / 双底观察</span><Toggle checked={prefs.enabled} label="显示信号标注" onChange={() => store.patch({ enabled: !prefs.enabled })} /></div>}
       </section>
       {asia && <section className="sx-section sx-anchor" aria-label="亚太交易时段高低点">
         <div className="sx-section-head"><h3>亚太交易时段高低点</h3><span>{asia.dateLabel} · 00–08 UTC</span></div>

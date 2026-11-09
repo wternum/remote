@@ -1,5 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { startRuntime } from './runtime/bootstrap';
+import { panelShortcut } from './lib/shortcuts';
 
 // 新外壳：Vela 工作区（vela.luxalgo.com 同款 UI）+ OKX 数据
 const VelaTerminal = lazy(() => import('./vela/VelaTerminal'));
@@ -54,18 +55,15 @@ export default function App() {
   const [frameworks, setFrameworks] = useState(false);
   const hash = useHash();
 
-  // 快捷键 C：开合确认引擎；F：开合四框架结构分析（输入框内不拦截；Vela 自己的快捷键不受影响）
+  // 快捷键 Shift+C：开合确认引擎；Shift+F：开合四框架结构分析（输入框内不拦截；Vela 自己的快捷键不受影响）
   const onKey = useCallback((e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null;
     if (t?.closest('input,textarea,select,[contenteditable="true"]')) return;
-    const k = e.key.toLowerCase();
-    if (k === 'c' && e.shiftKey) {
-      e.preventDefault();
-      setEngine(p => !p);
-    } else if (k === 'f' && e.shiftKey) {
-      e.preventDefault();
-      setFrameworks(p => !p);
-    }
+    const which = panelShortcut(e);
+    if (!which) return;
+    e.preventDefault();
+    if (which === 'engine') setEngine(p => !p);
+    else setFrameworks(p => !p);
   }, []);
   useEffect(() => {
     window.addEventListener('keydown', onKey);

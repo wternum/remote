@@ -123,7 +123,8 @@ export function simulate(
           proba: cand.proba,
           grade: cand.grade,
           evidence: cand.evidence,
-          rejectReason: cand.outcome ? (cand.proba < threshold ? 'confirm' : 'unfilled') : 'noNextBar',
+          // outcome 为 null（无下一根 K 线）的形态已在上方被丢弃，这里只剩两种原因
+          rejectReason: cand.proba < threshold ? 'confirm' : 'unfilled',
         } as Record<string, unknown>),
       } as TradedSignal);
       continue;

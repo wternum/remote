@@ -1,4 +1,4 @@
-import { ctValOf } from './types';
+import { tryCtValOf } from './types';
 import type { VolumeSource } from './types';
 
 export interface QuoteVolume { value: number; source: VolumeSource; }
@@ -11,7 +11,9 @@ export function quoteVolumeOfRow(row: readonly (string | number)[], symbol: stri
   if (!(close > 0) || !Number.isFinite(close)) return null;
   if (finite(row[6]) && base > 0) return { value: base * close, source: 'base_close_estimate' };
   if (finite(row[5]) && contracts > 0) {
-    const value = contracts * ctValOf(symbol) * close;
+    const ctVal = tryCtValOf(symbol);
+    if (ctVal == null) return null;
+    const value = contracts * ctVal * close;
     return Number.isFinite(value) ? { value, source: 'contracts_close_estimate' } : null;
   }
   return null;
