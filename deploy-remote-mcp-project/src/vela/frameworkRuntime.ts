@@ -5,7 +5,8 @@ import { flowPeriodOf, getFlow, releaseTape, subscribeFlow, syncFlow } from '@/q
 import { buildFrameworks, type FrameworkReport } from '@/quant/frameworks';
 import { labelOf } from '@/quant/fractal';
 import { projectFrameworkMarks, type FrameworkHud } from '@/quant/frameworkMarks';
-import type { AnnObstacle } from './annotTypes';
+import type { AnnLevel, AnnObstacle } from './annotTypes';
+import type { RefPoint } from '@/quant/marketRead';
 import { FW_OVER, FW_UNDER, registerFrameworkLayers, type FrameworkLayerData } from './frameworkLayer';
 import { getFrameworkMarkStore } from './frameworkMarkStore';
 import { isClosedCandle } from '@/lib/okxCandles';
@@ -81,6 +82,8 @@ type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: Framew
 
 /** 亚盘高低点只在日内周期、时段图层与「亚盘高低点」开关都打开时出标签（与时段图层同一口径） */
 const INTRADAY_MAX_BAR_MS = 12 * 3_600_000;
+/** 亚盘关闭时恒返回同一个对象，好让「输入没变就不重投影」的比较能命中 */
+const NO_ASIA = { levels: [] as AnnLevel[], refs: [] as RefPoint[], lastClose: NaN };
 
 function mountFrameworkRuntime(ctx: WidgetContext): () => void {
   const markStore = getFrameworkMarkStore();
@@ -178,20 +181,39 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     }
   };
 
+  // 亚盘高低点只和每根的高低有关：形成中那根只是收盘价在跳时不用重算
+  let asiaKey = '';
+  let asiaCache: { levels: ReturnType<typeof asiaRailLevels>; refs: ReturnType<typeof asiaRefs>; lastClose: number } = { levels: [], refs: [], lastClose: NaN };
   const asiaLevels = () => {
     const sp = sessionStore.getSnapshot().preferences;
-    if (!sp.enabled || !sp.showAsiaRange || !(market.barMs < INTRADAY_MAX_BAR_MS) || !isSupportedFrameworkSymbol(market.symbol)) return { levels: [], refs: [], lastClose: NaN };
+    if (!sp.enabled || !sp.showAsiaRange || !(market.barMs < INTRADAY_MAX_BAR_MS) || !isSupportedFrameworkSymbol(market.symbol)) return NO_ASIA;
     const raw = barsHub.get(market.symbol, market.tf) as readonly BarLike[];
-    return { levels: asiaRailLevels(raw), refs: asiaRefs(raw), lastClose: raw.at(-1)?.close ?? NaN };
+    const last = raw.at(-1);
+    const key = `${marketKey}|${raw.length}|${raw[0]?.time ?? 0}|${last?.time ?? 0}|${last?.high ?? 0}|${last?.low ?? 0}|${Math.floor(Date.now() / 60_000)}`;
+    if (key !== asiaKey) {
+      asiaKey = key;
+      asiaCache = { levels: asiaRailLevels(raw), refs: asiaRefs(raw), lastClose: last?.close ?? NaN };
+    }
+    return asiaCache;
   };
+
+  // 用户画线只在画线事件时变：缓存起来，不必每跳一次都去读
+  let obstacleCache: AnnObstacle[] | null = null;
+  const cachedObstacles = () => (obstacleCache ??= obstacles());
+
+  /** 上一次投影的输入：都没变就不重投影、不再序列化比对 */
+  let paintInputs: unknown[] = [];
 
   const paint = (force = false) => {
     if (!chart) return;
     const prefs = markStore.getSnapshot();
     // 亚盘标签属于时段图层的开关，不受「图表标注 开/关」影响；它们和四框架的线一起合带、一起配合着说
     const asia = asiaLevels();
+    const inputs: unknown[] = [cachedReport, prefs, asia, prefs.enabled ? cachedObstacles() : null, market.barMs];
+    if (!force && paintInputs.length && inputs.every((v, i) => v === paintInputs[i])) return;
+    paintInputs = inputs;
     const projected = projectFrameworkMarks(cachedReport, prefs, market.barMs, { extraLevels: asia.levels, refs: asia.refs });
-    projected.payload.obstacles = prefs.enabled ? obstacles() : [];
+    projected.payload.obstacles = prefs.enabled ? cachedObstacles() : [];
     if (!cachedReport && asia.levels.length && Number.isFinite(asia.lastClose)) projected.payload.decimals = decimalsFor(asia.lastClose);
     const hud = projected.hud;
     const prevHud = liveState.hud ?? null;
@@ -223,6 +245,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     lastClosedSeen = -1;
     cachedReport = null;
     paintFingerprint = '';
+    paintInputs = [];
     publishLive({
       market,
       report: null,
@@ -325,12 +348,15 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
       chartOff.splice(0).forEach(off => off());
       chart = next;
       paintFingerprint = '';
+      paintInputs = [];
       chartOff.push(chart.on('load:start', m => setMarket(m.symbol, m.timeframe)));
       chartOff.push(chart.on('load:end', () => schedule(true)));
       chartOff.push(chart.on('market:changed', m => setMarket(m.symbol, m.timeframe)));
-      chartOff.push(chart.on('drawing:created', () => paint()));
-      chartOff.push(chart.on('drawing:edited', () => paint()));
-      chartOff.push(chart.on('drawing:removed', () => paint()));
+      const drawingsChanged = () => { obstacleCache = null; paint(); };
+      chartOff.push(chart.on('drawing:created', drawingsChanged));
+      chartOff.push(chart.on('drawing:edited', drawingsChanged));
+      chartOff.push(chart.on('drawing:removed', drawingsChanged));
+      obstacleCache = null;
       setMarket(chart.market.symbol, chart.market.timeframe);
     } else if (!chart && !attachTimer) {
       attachTimer = setTimeout(() => {

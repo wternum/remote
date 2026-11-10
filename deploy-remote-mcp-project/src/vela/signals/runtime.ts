@@ -73,24 +73,43 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
       }));
     } catch { return []; }
   };
+  // 形成中那根每跳一次都会走到这里：分析结果、设置、选中项都没变时直接复用上次的投影
+  let projMemo: { analysis: SignalAnalysis; preferences: typeof preferences; focusId: typeof focusId; projected: ReturnType<typeof projectSignals> } | null = null;
+  let lastRuntime: Record<string, unknown> | null = null;
+  const offChartPayload = emptySignalPayload();
   const paint = () => {
-    const projected = MARKERS_ENABLED
-      ? projectSignals(analysis, preferences, focusId)
-      : { payload: emptySignalPayload(), visible: [], counts: emptyCounts() };
-    // 标记下线期间恒下发空 payload；write() 内部按指纹去重，只有首次真正触达图层。
-    if (MARKERS_ENABLED && preferences.enabled) projected.payload.obstacles = obstacles();
-    write(MW_ON_CHART ? projected.payload : emptySignalPayload());
+    let projected: ReturnType<typeof projectSignals>;
+    if (projMemo && projMemo.analysis === analysis && projMemo.preferences === preferences && projMemo.focusId === focusId) {
+      projected = projMemo.projected;
+    } else {
+      projected = MARKERS_ENABLED
+        ? projectSignals(analysis, preferences, focusId)
+        : { payload: emptySignalPayload(), visible: [], counts: emptyCounts() };
+      projMemo = { analysis, preferences, focusId, projected };
+    }
+    if (MW_ON_CHART) {
+      if (MARKERS_ENABLED && preferences.enabled) projected.payload.obstacles = obstacles();
+      write(projected.payload);
+    } else {
+      // 不画在图上：恒下发同一份空 payload；write() 按指纹去重，只有第一次真正触达图层
+      write(offChartPayload);
+    }
     const period = flowPeriodOf(timeframe);
     const snap = period ? getFlow(symbol, period) : undefined;
-    store.updateRuntime({
+    const runtime = {
       symbol, timeframe,
-      status: !preferences.enabled ? 'paused' : loadError ? 'error' : loading ? 'loading' : 'ready',
+      status: (!preferences.enabled ? 'paused' : loadError ? 'error' : loading ? 'loading' : 'ready') as 'paused' | 'error' | 'loading' | 'ready',
       message: loadError,
       bars: analysis.bars, requested: analysis.requested, gapTruncated: analysis.gapTruncated, historyShort: analysis.historyShort, covered: analysis.covered,
       flowSupported: !!period, flowConnected: !!snap?.tape.connected,
       flowSyncing: flowBusy, updatedAt: lastScanAt,
       counts: projected.counts, visible: projected.visible, total: projected.visible.length,
-    });
+    };
+    // 状态没变就不通知侧栏重新渲染（以前每 300ms 都发一次新对象）
+    const prev = lastRuntime;
+    if (prev && (Object.keys(runtime) as (keyof typeof runtime)[]).every(k => prev[k] === runtime[k])) return;
+    lastRuntime = runtime;
+    store.updateRuntime(runtime);
   };
   const stopFlow = () => {
     flowEpoch++;
@@ -177,8 +196,10 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
     const lastCandle = toCandle(last);
     const previous = last.time < now && isClosedCandle(lastCandle, barMs, now) ? last : raw.at(-2);
     // 键只由「已收盘状态」驱动：未勾选预览时，形成中那根的价格跳动不触发重算
+    // 只用最近 max(1200, 回看 + 900) 根：更早的历史分页到达不触发重新分析
+    const span = Math.min(raw.length, Math.max(1200, preferences.lookback + 900) + 8);
     const key = signalRecomputeKey({
-      marketKey, length: raw.length, firstTs: raw[0].time, lastTs: last.time,
+      marketKey, length: span, firstTs: raw[raw.length - span].time, lastTs: last.time,
       prevClose: previous?.close, prevVolume: previous?.volume,
       closedOpen: previous?.open, closedHigh: previous?.high, closedLow: previous?.low,
       barMs, now, preview: preferences.preview,

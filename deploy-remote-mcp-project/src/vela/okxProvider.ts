@@ -176,6 +176,21 @@ function merge(key: string, incoming: OHLCV[]) {
   listeners.forEach(fn => fn(key));
 }
 
+/**
+ * 交给图表的 K 线：取镜像里合并后的那份（同一根取累计成交额更大的那份）。
+ * 重连补洞拉到的 REST 快照常比 WebSocket 已推送的形成中那根旧一点，直接交给图表会让成交量柱和
+ * 高低收往回跳一下（实测 BTC 5m：REST 3,947,416 < 已推送 3,974,587）。
+ */
+function mergedOf(key: string, b: OHLCV): OHLCV {
+  const cur = store.get(key);
+  if (!cur?.length) return b;
+  for (let i = cur.length - 1, n = 0; i >= 0 && n < 64; i--, n++) {
+    if (cur[i].time === b.time) return cur[i];
+    if (cur[i].time < b.time) break;
+  }
+  return b;
+}
+
 export const barsHub = {
   key: keyOf,
   get(ticker: string, tf: string): readonly OHLCV[] {
@@ -407,10 +422,10 @@ export class OKXProvider implements DataProvider {
         merge(marketKey, fresh);
         if (!hadPriorBars || prevLastTime == null) {
           const last = fresh[fresh.length - 1];
-          if (last) onBar(last);
+          if (last) onBar(mergedOf(marketKey, last));
         } else {
           for (const b of fresh) {
-            if (b.time >= prevLastTime) onBar(b);
+            if (b.time >= prevLastTime) onBar(mergedOf(marketKey, b));
           }
         }
       } catch (err) {
@@ -504,16 +519,15 @@ export class OKXProvider implements DataProvider {
           const fresh: MarketBar[] = [];
           for (const r of msg.data) {
             const b = parseRow(r, ticker);
-            if (b) {
-              onBar(b);
-              fresh.push(b);
-            }
+            if (b) fresh.push(b);
           }
           if (fresh.length) {
             const minNew = Math.min(...fresh.map(b => b.time));
             const cur = store.get(marketKey) ?? [];
             const hasStaleUnconfirmed = cur.slice(-8).some(b => b.time < minNew && (b as MarketBar).confirm === 0);
             merge(marketKey, fresh);
+            // 先合并再交给图表：迟到的旧推送不会把形成中那根改回去
+            for (const b of fresh) onBar(mergedOf(marketKey, b));
             if (hasStaleUnconfirmed) scheduleConfirmRepair();
             armCloseWatchdog(fresh.reduce((a, b) => (b.time > a.time ? b : a)));
           }

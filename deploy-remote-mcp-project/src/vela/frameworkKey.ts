@@ -56,10 +56,13 @@ export function frameworkInputKey(raw: readonly OHLCV[], market: FrameworkMarket
       break;
     }
   }
+  // 结构分析只用最近 FRAMEWORK_MAX_BARS 根：更早的历史分页陆续到达时不该触发重算（以前每来一页都全量重算一次，
+  // 切换品种 / 周期后的十几秒里图表一卡一卡）
+  const span = Math.min(raw.length, FRAMEWORK_MAX_BARS + 8);
   const base = signalRecomputeKey({
     marketKey: barsHub.key(market.symbol, market.tf),
-    length: raw.length,
-    firstTs: raw[0]?.time ?? 0,
+    length: span,
+    firstTs: raw[raw.length - span]?.time ?? 0,
     lastTs: last?.time ?? 0,
     prevClose: closed?.close,
     prevVolume: closed?.volume,

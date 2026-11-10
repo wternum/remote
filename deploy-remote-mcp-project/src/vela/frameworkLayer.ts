@@ -76,6 +76,16 @@ interface Frame {
   last: { x: number; closeY: number; close: number } | null;
 }
 
+/** 按时间二分出 x 落在 [x0, x1] 里的 K 线下标范围（K 线按时间升序，x 随时间单调） */
+export function visibleSpan(bars: readonly { time: number }[], X: (ms: number) => number, x0: number, x1: number): [number, number] {
+  let lo = 0, hi = bars.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (X(bars[m].time) < x0) lo = m + 1; else hi = m; }
+  const from = lo;
+  lo = from; hi = bars.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (X(bars[m].time) <= x1) lo = m + 1; else hi = m; }
+  return [from, lo - 1];
+}
+
 function makeIndexCache() {
   let key = '';
   let map = new Map<number, number>();
@@ -117,11 +127,11 @@ function setup(
   const bw = Math.max(1, coords.pxPerBar());
   const fmt = (v: number) => v.toFixed(p.decimals);
 
+  // 只遍历屏幕里（左右各留两根）的 K 线：历史上万根时每一帧都全量换算坐标会拖慢重绘
   const cols: Column[] = [];
-  for (let i = 0; i < bars.length; i++) {
-    const x = X(bars[i].time);
-    if (x < -bw * 2 || x > W + bw * 2) continue;
-    cols.push({ x, top: Y(bars[i].high), bottom: Y(bars[i].low) });
+  const [from, to] = visibleSpan(bars, X, -bw * 2, W + bw * 2);
+  for (let i = from; i <= to; i++) {
+    cols.push({ x: X(bars[i].time), top: Y(bars[i].high), bottom: Y(bars[i].low) });
   }
   const occ = buildOccupancy(cols, Math.max(1, bw * 0.45));
   const index = indexOf(bars);
