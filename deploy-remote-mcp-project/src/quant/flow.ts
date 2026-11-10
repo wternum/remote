@@ -535,7 +535,9 @@ async function syncRubik(snap: FlowSnapshot, base: string, minTs: number, maxPag
 export function syncFlow(
   instId: string,
   period: string,
-  opts: { minTs: number; maxPages?: number; oiPages?: number; bootstrapPages?: number; bootstrapBars?: number; signal?: AbortSignal; owner?: string },
+  opts: { minTs: number; maxPages?: number; oiPages?: number; bootstrapPages?: number; bootstrapBars?: number; signal?: AbortSignal; owner?: string;
+    /** false = 只同步 rubik 官方统计，不建立实时逐笔 WS（批量扫描多个市场时用，避免无人释放的连接） */
+    tape?: boolean },
 ): Promise<FlowSnapshot> {
   const key = flowKey(instId, period);
   const running = inflight.get(key);
@@ -554,7 +556,7 @@ export function syncFlow(
     cache.set(key, snap);
     if (opts.signal?.aborted) return snap;
     // Establish the live connection before waiting for paginated historical statistics.
-    const liveTape = typeof window !== 'undefined' ? ensureTape(instId, snap, opts.owner) : null;
+    const liveTape = typeof window !== 'undefined' && opts.tape !== false ? ensureTape(instId, snap, opts.owner) : null;
     const base = rubikBase();
     try {
       // 失败冷却：无代理的静态环境里 rubik 恒失败，避免每 30s 重复全量翻页空转。

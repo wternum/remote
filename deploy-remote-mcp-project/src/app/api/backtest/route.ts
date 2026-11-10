@@ -5,7 +5,7 @@ import { getCandles } from "@/server/okx";
 import { simulate, summarize, MAX_HOLD_5M, MAX_HOLD_15M } from "@/lib/engine";
 import { SYMBOLS, type BacktestResult, type TradedSignal } from "@/lib/types";
 import { clampThreshold, configFromCookie } from "@/quant/config";
-import { getFlow, syncFlow, type FlowSnapshot } from "@/quant/flow";
+import { syncFlow, type FlowSnapshot } from "@/quant/flow";
 import { closedCandles } from "@/lib/candles";
 import { SCAN_BARS_ALLOWED, badRequest, parseBar, parseSymbol } from "@/lib/market";
 import { setBounded } from "@/lib/lru";
@@ -105,9 +105,8 @@ export async function GET(req: Request) {
     const candles = closedCandles(loadedOne.candles, bar);
     const flowPromise =
       loadedOne.live && !loadedOne.gapped && candles.length
-        ? typeof window === "undefined"
-          ? syncFlow(s, bar, { minTs: candles[0]?.ts ?? 0, maxPages: 4, oiPages: 2 }).catch(() => null)
-          : Promise.resolve(getFlow(s, bar) ?? null)
+        // 与确认引擎同口径：每个币种同步自己的 rubik 统计，不依赖当前图表正在看哪个市场
+        ? syncFlow(s, bar, { minTs: candles[0]?.ts ?? 0, maxPages: 4, oiPages: 2, tape: false }).catch(() => null)
         : undefined;
     loaded.push({ ...loadedOne, candles, flowPromise });
   }

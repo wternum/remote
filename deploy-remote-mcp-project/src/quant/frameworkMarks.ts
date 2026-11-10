@@ -117,9 +117,12 @@ const emptyPayload = (decimals = 2): AnnPayload => ({
 /** 图表时区为 UTC：悬停里统一写 "11-09 22:50"，不再附加 "UTC" 噪音 */
 const fmtTime = (ts: number | null | undefined) =>
   ts != null && Number.isFinite(ts) ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') : '—';
+/** 窗口时长：5m→"10 小时"，4H→"20 天"，1D→"120 天"（不再出现"2880 小时"） */
 const hoursText = (bars: number, barMs: number) => {
   const h = (bars * barMs) / 3_600_000;
-  return h >= 1 ? `${Number.isInteger(h) ? h : h.toFixed(1)} 小时` : `${Math.round(h * 60)} 分钟`;
+  const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+  if (h >= 48) return `${num(h / 24)} 天`;
+  return h >= 1 ? `${num(h)} 小时` : `${Math.round(h * 60)} 分钟`;
 };
 
 type Pool = LiquidityPoolCluster;

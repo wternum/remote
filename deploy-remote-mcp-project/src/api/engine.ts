@@ -4,7 +4,7 @@ import { runScan, SCAN_BARS, liveFlowOf, EXIT_PLANS, type Candidate, type ExitPl
 import { FACTORS, MODEL } from '@/quant/model';
 import { configFromCookie, getConfig } from '@/quant/config';
 import { closedCandles } from '@/lib/candles';
-import { getFlow, syncFlow, type FlowSnapshot } from '@/quant/flow';
+import { syncFlow, type FlowSnapshot } from '@/quant/flow';
 import { SCAN_BARS_ALLOWED, badRequest, parseBar, parseSymbol } from '@/lib/market';
 import { setBounded } from '@/lib/lru';
 
@@ -112,14 +112,15 @@ export async function GET(req: Request) {
       flow = undefined;
       if (!live || tfGapped || !candles.length) continue;
 
-      const flowPromise: Promise<FlowSnapshot | null> =
-        typeof window === 'undefined'
-          ? syncFlow(s, tf, {
-              minTs: candles[0]?.ts ?? 0,
-              maxPages: 4,
-              oiPages: 2,
-            }).catch(() => null)
-          : Promise.resolve(getFlow(s, tf) ?? null);
+      // 每个币种 / 周期都按同样深度同步自己的 rubik 统计（浏览器经 /api/okx 代理）。
+      // 旧实现在浏览器里只读 getFlow()：只有「当前图表那个市场」有真实成交，
+      // ALL 扫描时同一形态的概率会因用户正在看哪张图而不同。
+      const flowPromise: Promise<FlowSnapshot | null> = syncFlow(s, tf, {
+        minTs: candles[0]?.ts ?? 0,
+        maxPages: 4,
+        oiPages: 2,
+        tape: false,
+      }).catch(() => null);
       prepared.push({ s, tf, candles, flowPromise });
     }
   }
