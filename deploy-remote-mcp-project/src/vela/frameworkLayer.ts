@@ -355,7 +355,9 @@ function renderRail(f: Frame, taken: Rect[], hits: Hit[]) {
     const suffix = extra > 0 ? ` +${extra}` : '';
     const full = `${lead.name} ${priceTxt}${suffix}`;
     const y0 = Math.round(r.y - LABEL_H / 2);
-    const tries = [full, `${lead.name} ${priceShort}${suffix}`, `${priceShort}${suffix}`];
+    // 名称形如「POC 成交最密」：空间不够时先退到短名「POC 86.52」，最后才只剩价格
+    const shortName = lead.name.split(' ')[0];
+    const tries = [full, `${lead.name} ${priceShort}${suffix}`, `${shortName} ${priceShort}${suffix}`, `${priceShort}${suffix}`];
     let text = '';
     let rect: Rect | null = null;
     for (const t of tries) {
@@ -401,7 +403,8 @@ function renderEvents(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, st
   const seen = new Set<string>();
   const events = [...f.p.events].sort((a, b) => b.priority - a.priority);
   const s = bw < 3 ? 3.5 : 5;
-  const showText = bw >= 3 && W >= 520;
+  // 5m 默认视野约 3px/根：门槛设 2px，放不下的文字仍由 pickCandidate 避让后省略，只留标记
+  const showText = bw >= 2 && W >= 520;
   const geo = events
     .map(ev => {
       const b = f.barAt(ev.ts);

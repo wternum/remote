@@ -124,27 +124,36 @@ function closedSeries(input: readonly Candle[], barMs: number, now: number) {
   return { candles, quality };
 }
 
-interface Part { label: string; bias: 1 | -1 | 0; strength: number; available: boolean }
+export interface Part { label: string; bias: 1 | -1 | 0; strength: number; available: boolean }
 
-function confluenceOf(parts: Part[]): Confluence {
+/** 强调度低于该值的视角在汇总里按中性计（仍保留在各自的明细中）。 */
+export const WEAK_VIEW_FLOOR = 0.1;
+
+export function confluenceOf(parts: Part[]): Confluence {
   let long = 0, short = 0, neutral = 0, unavailable = 0, net = 0;
   for (const p of parts) {
     if (!p.available) { unavailable++; continue; }
-    if (p.bias > 0) long++;
-    else if (p.bias < 0) short++;
+    const strength = Math.max(0, Math.min(1, p.strength));
+    // A fading signal (e.g. a 44-bar-old BOS decayed to 0.025) must not count as a
+    // full directional vote; below the floor it is reported as neutral.
+    const bias = strength >= WEAK_VIEW_FLOOR ? p.bias : 0;
+    if (bias > 0) long++;
+    else if (bias < 0) short++;
     else neutral++;
-    net += p.bias * Math.max(0, Math.min(1, p.strength));
+    net += bias * strength;
   }
   const verdict: Confluence['verdict'] =
     long >= 3 && short === 0 && unavailable === 0 ? 'long'
       : short >= 3 && long === 0 && unavailable === 0 ? 'short'
-      : net > 0.15 && long > short ? 'lean_long'
-      : net < -0.15 && short > long ? 'lean_short' : 'neutral';
+      // 「共振」至少要两个视角同向：单一视角（例如只有 AMT 价值下移）不能把汇总翻成偏向
+      : net > 0.15 && long >= 2 && long > short ? 'lean_long'
+      : net < -0.15 && short >= 2 && short > long ? 'lean_short' : 'neutral';
   const name: Record<Confluence['verdict'], string> = {
     long: '多个结构视角同向偏多', short: '多个结构视角同向偏空',
     lean_long: '结构启发式偏多', lean_short: '结构启发式偏空', neutral: '中性 / 分歧 / 数据不足',
   };
-  const detail = parts.map(p => `${p.label}:${!p.available ? '无数据' : p.bias > 0 ? '多' : p.bias < 0 ? '空' : '平'}`).join(' · ');
+  const lean = (p: Part) => (p.strength >= WEAK_VIEW_FLOOR ? p.bias : 0);
+  const detail = parts.map(p => `${p.label}:${!p.available ? '无数据' : lean(p) > 0 ? '多' : lean(p) < 0 ? '空' : p.bias !== 0 ? '平（信号已减弱）' : '平'}`).join(' · ');
   return {
     long, short, neutral, unavailable, net: r3(net), verdict,
     headline: `${name[verdict]}（多 ${long} / 空 ${short} / 平 ${neutral} / 无数据 ${unavailable}，加权 ${net >= 0 ? '+' : ''}${net.toFixed(2)}）—— ${detail}。同一行情上的相关视角，不是独立投票、概率或胜率。`,

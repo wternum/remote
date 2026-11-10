@@ -152,6 +152,8 @@ export interface FractalPivot {
   ts: number;
   price: number;
   rel: HighRel | LowRel;
+  /** 用来比较的前一个同类分形价格（HH/LH/EQH 相对它而言） */
+  prevPrice: number;
   confirmedAt: number;
 }
 
@@ -307,7 +309,7 @@ export function tfStructure(cs: readonly Candle[], k = 2, tolPct?: number, optio
       const r = cmpTol(highs[i].price, highs[i - 1].price, tol);
       recentPivots.push({
         kind: 'high', idx: highs[i].idx, ts: highs[i].ts, price: highs[i].price,
-        rel: r === 1 ? 'HH' : r === -1 ? 'LH' : 'EQH', confirmedAt: highs[i].confirmedAt,
+        rel: r === 1 ? 'HH' : r === -1 ? 'LH' : 'EQH', prevPrice: highs[i - 1].price, confirmedAt: highs[i].confirmedAt,
       });
     }
     for (let i = Math.max(1, lows.length - 2); i < lows.length; i++) {
@@ -315,7 +317,7 @@ export function tfStructure(cs: readonly Candle[], k = 2, tolPct?: number, optio
       const r = cmpTol(lows[i].price, lows[i - 1].price, tol);
       recentPivots.push({
         kind: 'low', idx: lows[i].idx, ts: lows[i].ts, price: lows[i].price,
-        rel: r === 1 ? 'HL' : r === -1 ? 'LL' : 'EQL', confirmedAt: lows[i].confirmedAt,
+        rel: r === 1 ? 'HL' : r === -1 ? 'LL' : 'EQL', prevPrice: lows[i - 1].price, confirmedAt: lows[i].confirmedAt,
       });
     }
     recentPivots.sort((a, b) => a.idx - b.idx);

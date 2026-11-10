@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore, type ReactNode } from 'react';
 import { Crosshair, RefreshCw, X } from 'lucide-react';
-import type { FrameworkReport } from '@/quant/frameworks';
+import { WEAK_VIEW_FLOOR, type FrameworkReport } from '@/quant/frameworks';
 import { decimalsFor } from '@/vela/annotTypes';
 import { getFrameworkMarkStore } from '@/vela/frameworkMarkStore';
 import { barsHub } from '@/vela/okxProvider';
@@ -114,7 +114,7 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
     { label: '多周期', bias: report.mtf.bias, strength: report.mtf.strength, na: report.mtf.considered < 2 },
     { label: 'Wyckoff', bias: report.wyckoff.bias, strength: report.wyckoff.strength, na: report.wyckoff.phase === 'unknown' },
     { label: 'AMT', bias: report.auction.bias, strength: report.auction.strength, na: report.auction.profile.poc == null },
-  ] : [];
+  ].map(f => ({ ...f, bias: f.strength >= WEAK_VIEW_FLOOR ? f.bias : 0 })) : [];
 
   return (
     <div className="fw-overlay">

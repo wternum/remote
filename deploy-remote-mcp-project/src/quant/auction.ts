@@ -90,10 +90,23 @@ const validBar = (c: Candle | undefined): c is Candle => !!c &&
   c.l > 0 && c.h >= c.l && c.h >= Math.max(c.o, c.c) &&
   c.l <= Math.min(c.o, c.c) && c.v >= 0;
 
+/** 1-2-5 ladder: the smallest "nice" step ≥ x. */
+function niceStep(x: number): number {
+  const e = Math.floor(Math.log10(x));
+  const base = 10 ** e;
+  const f = x / base;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * base;
+}
+
+/**
+ * Profile bin ≈ 1 bp of price on a 1-2-5 ladder (SOL 86 → 0.01, ETH 3500 → 0.5, BTC 100k → 10).
+ * It must NOT follow the per-bar ATR: a grid whose width changes every candle made
+ * POC/VAH jump by up to ~0.8 ATR between consecutive bars on live SOL 5m data,
+ * while a fixed tick grid stayed within one tick. ATR is only a fallback.
+ */
 export function binWidthOf(price: number, atr: number): number {
-  const basis = Number.isFinite(atr) && atr > 0 ? 0.25 * atr
-    : Number.isFinite(price) && price > 0 ? price * 0.001 : 1;
-  return Math.max(Number.EPSILON, basis);
+  if (Number.isFinite(price) && price > 0) return Math.max(Number.EPSILON, niceStep(price * 1e-4));
+  return Number.isFinite(atr) && atr > 0 ? 0.25 * atr : 1;
 }
 
 /** Existing project convention: simple mean of the last 14 true ranges (not Wilder EMA). */

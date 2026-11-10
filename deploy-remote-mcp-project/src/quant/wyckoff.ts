@@ -223,6 +223,34 @@ export function classifyPhase(ctx: Ctx, lookback = 160, springs = findSprings(ct
   return { phase: 'balance', reason: fresh ? '有弹簧/上冲候选，但缺少足够新的区间边缘量价背景；保持均衡描述。' : '高低点未形成连续同向结构，且没有足够新的区间边缘弹簧/上冲证据。' };
 }
 
+/**
+ * One impulsive leg often leaves several overlapping three-candle gaps (e.g. 87.52–87.69
+ * and 87.41–87.46 from consecutive bearish bars). Shown separately, the projection's
+ * "nearest 3" picks the thin sliver and hides the main gap. Same-direction gaps whose
+ * three-candle windows overlap are one imbalance: union their price range. Callers pass
+ * only still-open gaps, so a filled part never widens the zone; touched = any part touched.
+ */
+export function mergeAdjacentFvgs(zones: readonly FvgZone[]): FvgZone[] {
+  const sorted = [...zones].sort((a, b) => a.from - b.from);
+  const out: FvgZone[] = [];
+  for (const z of sorted) {
+    const last = out[out.length - 1];
+    if (last && last.kind === z.kind && z.from <= last.to) {
+      const filled = last.filled && z.filled;
+      out[out.length - 1] = {
+        ...last,
+        to: Math.max(last.to, z.to),
+        lo: Math.min(last.lo, z.lo),
+        hi: Math.max(last.hi, z.hi),
+        touched: last.touched || z.touched,
+        filled,
+        fillIdx: filled ? Math.max(last.fillIdx ?? -1, z.fillIdx ?? -1) : null,
+      };
+    } else out.push({ ...z });
+  }
+  return out;
+}
+
 export function readWyckoff(ctx: Ctx, windowBars = 96, fvgLookback = 160): WyckoffRead {
   const to = ctx.n - 1;
   const effort = effortResult(ctx, windowBars);
@@ -231,8 +259,9 @@ export function readWyckoff(ctx: Ctx, windowBars = 96, fvgLookback = 160): Wycko
   // findFvgs' `from` is the THIRD candle index. Shift by two so the entire
   // three-candle formation stays inside the requested lookback window.
   const windowStart = Math.max(0, to - Math.max(3, fvgLookback) + 1);
-  const imbalances: WyckoffFvg[] = findFvgs(ctx, Math.max(2, windowStart + 2), to, to)
-    .filter(z => !z.filled).sort((a, b) => b.to - a.to).slice(0, 6)
+  // 先剔除已填满的缺口再合并：否则已回补的上半截会被并进一个"未回补"区里
+  const imbalances: WyckoffFvg[] = mergeAdjacentFvgs(findFvgs(ctx, Math.max(2, windowStart + 2), to, to).filter(z => !z.filled))
+    .sort((a, b) => b.to - a.to).slice(0, 6)
     .map(z => ({ ...z, fromTs: ctx.cs[z.from]?.ts ?? ctx.cs[to].ts, toTs: ctx.cs[z.to]?.ts ?? ctx.cs[to].ts }));
   let bias: 1 | -1 | 0 = 0;
   let strength = 0;

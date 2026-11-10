@@ -50,6 +50,9 @@ export interface LiquidityRead {
   pools: LiquidityPoolCluster[];
   nearestAbove: LiquidityPoolCluster | null;
   nearestBelow: LiquidityPoolCluster | null;
+  /** 最近的未破等高 / 等低池（≥2 个摆动）。常比更近的单个前高/前低更重要，单独给出。 */
+  poolAbove: LiquidityPoolCluster | null;
+  poolBelow: LiquidityPoolCluster | null;
   stopHunts: StopHunt[];
   structure: StructureEvent | null;
   structureTs: number | null;
@@ -242,7 +245,7 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
 /** Only fresh events drive bias; historical events remain visible but decay to zero. */
 export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
   const to = ctx.n - 1;
-  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, bias: 0, strength: 0, headline: '没有已收盘行情。' };
+  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, poolAbove: null, poolBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, bias: 0, strength: 0, headline: '没有已收盘行情。' };
   const price = ctx.cs[to].c;
   const { tops, bottoms } = equalLevels(ctx);
   const pools = [...tops, ...bottoms];
@@ -250,6 +253,8 @@ export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
     list.filter(ok).sort((x, y) => Number(y.active) - Number(x.active) || x.distanceAtr - y.distanceAtr)[0] ?? null;
   const nearestAbove = pickNearest(tops, p => p.price >= price);
   const nearestBelow = pickNearest(bottoms, p => p.price <= price);
+  const poolAbove = pickNearest(tops, p => p.price >= price && p.active && p.equal);
+  const poolBelow = pickNearest(bottoms, p => p.price <= price && p.active && p.equal);
   const hunts = stopHunts(ctx, lookback);
   const structure = latestStructure(ctx, to);
   const structureTs = structure ? ctx.cs[structure.idx]?.ts ?? null : null;
@@ -270,5 +275,5 @@ export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
     : structure && to - structure.idx <= FRESH_EVENT_BARS
       ? `近期无新的扫位事件；${to - structure.idx} 根前出现简化 ${structure.kind} 收盘越位事件。`
       : '近期没有足够新的扫位/越位证据；历史关键位仅作参考，方向保持中性。';
-  return { pools, nearestAbove, nearestBelow, stopHunts: hunts, structure, structureTs, structureAgeBars, bias, strength, headline };
+  return { pools, nearestAbove, nearestBelow, poolAbove, poolBelow, stopHunts: hunts, structure, structureTs, structureAgeBars, bias, strength, headline };
 }
