@@ -24,6 +24,7 @@ import type { FrameworkReport } from './frameworks';
 import { fmtWhen } from '@/lib/displayTime';
 import type { Tfbias } from './fractal';
 import {
+  BAND_MAX_UNITS,
   bandShort,
   buildScene,
   MAX_TEST_MARKS,
@@ -227,25 +228,54 @@ export function projectFrameworkMarks(
         short: p.equal ? `${up ? '等高' : '等低'}×${p.touches} ${fmtR(p.price)}` : `${up ? '前高' : '前低'} ${fmtR(p.price)}`,
       });
     }
+    // 冲进去又被打回来的那一段（假突破 / 假跌破，含突破失败）：这一带真正被试过的范围
+    for (const t of L.tests) {
+      if (t.kind !== 'false' || report.lastTs - t.ts > BAND_LOOKBACK_BARS * barMs) continue;
+      const up = t.side === 'above';
+      const zLo = t.zoneLo ?? t.level, zHi = t.zoneHi ?? t.level;
+      // 影线长到一条带都装不下（插针）：只算那个价位区本身，不把整根针当成一条带
+      const spike = Math.abs(t.extreme - (up ? zHi : zLo)) > BAND_MAX_UNITS * unit;
+      const lo = up || spike ? zLo : t.extreme, hi = up && !spike ? t.extreme : zHi;
+      const span = t.confirmTs != null ? `${when(t.ts)}–${when(t.confirmTs)}` : when(t.ts);
+      const range = hi > lo ? `${fmtR(lo)}–${fmtR(hi)}` : fmtR(lo);
+      const key = `test:${t.ts}:${t.side}`;
+      const word = (a: number, b: number) => (b > a ? `${fmtR(a)}–${fmtR(b)}` : fmtR(a));
+      // 被测试的那几个高低点本身不再单独列（说的就是它们）
+      const tiny = Math.abs(t.level) * 0.0002;
+      // 色带仍从这个区最早出现的那根画起
+      let since = t.ts;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.key.startsWith('pool:') && it.lo >= zLo - tiny && it.hi <= zHi + tiny) {
+          if (it.ts != null) since = Math.min(since, it.ts);
+          items.splice(i, 1);
+        }
+      }
+      // 同一根冲穿了挨着的两个区（一根插针）：合成一样来说
+      const twin = items.find(i => i.key === key);
+      if (twin) {
+        twin.lo = Math.min(twin.lo, lo);
+        twin.hi = Math.max(twin.hi, hi);
+        twin.desc = `${span} ${up ? '冲上去又跌回来' : '跌下去又弹回来'}的 ${word(twin.lo, twin.hi)}`;
+        twin.short = `${up ? '假突破' : '假跌破'} ${word(twin.lo, twin.hi)}`;
+        twin.ts = Math.min(twin.ts ?? since, since);
+        continue;
+      }
+      items.push({
+        key, lo, hi, ts: since,
+        desc: `${span} ${up ? '冲上去又跌回来' : '跌下去又弹回来'}的 ${range}`,
+        short: `${up ? '假突破' : '假跌破'} ${range}`,
+      });
+    }
     for (const pd of [L.pendingAbove, L.pendingBelow]) {
       if (!pd || !Number.isFinite(pd.price) || pd.distanceAtr > MAX_POOL_DISTANCE_ATR) continue;
-      if (items.some(i => Math.abs(i.lo - pd.price) <= Math.abs(pd.price) * 0.0002)) continue;
+      const tiny = Math.abs(pd.price) * 0.0002;
+      if (items.some(i => pd.price >= i.lo - tiny && pd.price <= i.hi + tiny)) continue;
       const up = pd.side === 'above';
       items.push({
         key: `pending:${pd.side}`, lo: pd.price, hi: pd.price, ts: pd.ts,
         desc: `${when(pd.ts)} 的${up ? '高点' : '低点'} ${fmtR(pd.price)}（还没确认）`,
         short: `${up ? '高点' : '低点'} ${fmtR(pd.price)}（未确认）`,
-      });
-    }
-    // 刺穿后收回的那根冲到 / 跌到的价：这一带真正被试过的边
-    for (const t of L.tests) {
-      if (t.kind !== 'false' || report.lastTs - t.ts > BAND_LOOKBACK_BARS * barMs) continue;
-      const up = t.side === 'above';
-      if (items.some(i => i.lo === t.extreme)) continue;
-      items.push({
-        key: `test:${t.ts}:${t.side}`, lo: t.extreme, hi: t.extreme, ts: t.ts,
-        desc: `${when(t.ts)} ${up ? '冲到' : '跌到'}的 ${fmt(t.extreme)}`,
-        short: `${when(t.ts)} ${up ? '冲到' : '跌到'}的 ${fmt(t.extreme)}`,
       });
     }
   }
@@ -280,15 +310,19 @@ export function projectFrameworkMarks(
     return ts.length ? Math.max(floor, Math.min(...ts)) : report.lastTs - 12 * barMs;
   };
   const touchText = (list: readonly Touch[], up: boolean) =>
-    `${list.map(t => `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.price)}`).join('、')}，${countWord(list.length)}次都收了回来。`;
+    `${list.map(t => `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.price)}`).join('、')}，${countWord(list.length)}次都${up ? '收了回来' : '弹了回来'}。`;
   const bandLevel = (b: Band, pressure: boolean): AnnLevel => {
     const touches = pressure ? scene.touchP : scene.touchS;
     const next = pressure ? scene.nextUp : scene.nextDown;
     const name = box ? (pressure ? '箱顶' : '箱底') : pressure ? '压力带' : '支撑带';
     const edge = b.inside ? (price - b.lo <= b.hi - price ? b.lo : b.hi) : pressure ? b.lo : b.hi;
+    const ep = b.items.find(i => i.key.startsWith('test:'));
+    const others = b.items.filter(i => i !== ep);
     const first = touches.length >= 2
       ? touchText(touches, pressure)
-      : b.items.length >= 2
+      : ep
+        ? `${ep.desc}${others.length ? `；还叠着${sp(others.map(i => i.desc).join('、'))}` : ''}。`
+        : b.items.length >= 2
         ? `这里叠着${countWord(b.items.length)}样：${b.items.map(i => i.desc).join('、')}。`
         : `${b.items[0].desc}。`;
     const nextText = next ? `，${pressure ? '上面' : '下面'}先看${sp(bandShort(next, fmtR))}` : '';
@@ -371,43 +405,68 @@ export function projectFrameworkMarks(
     for (const t of picked) {
       const up = t.side === 'above';
       const lv = fmtR(t.level);
-      const names = refNamesAt(refs, t.level, unit);
+      const zLo = t.zoneLo ?? t.level, zHi = t.zoneHi ?? t.level;
+      const zone = zHi > zLo ? `${fmtR(zLo)}–${fmtR(zHi)}` : lv;
+      // 收回时要回到区的另一边：高点区看下沿，低点区看上沿
+      const backLv = fmtR(up ? zLo : zHi);
+      const names = [...new Set([...refNamesAt(refs, zLo, unit), ...refNamesAt(refs, zHi, unit)])];
       const what = names.length
-        ? `${names.join('、')}${t.touches >= 2 ? `，前面也 ${t.touches} 次没${up ? '过去' : '破'}` : ''}`
-        : t.touches >= 2 ? `前面 ${t.touches} 次没${up ? '过去的高点' : '破的低点'}` : `${when(t.levelTs)} 的${up ? '高点' : '低点'}`;
+        ? `${names.join('、')}${t.touches >= 2 ? `，前面也${countWord(t.touches)}次没${up ? '过去' : '破'}` : ''}`
+        : t.touches >= 2 ? `${countWord(t.touches)}次没${up ? '过去的高点' : '破的低点'}` : `${when(t.levelTs)} 的${up ? '高点' : '低点'}`;
       const vol = t.effortRatio != null && t.effortRatio >= 1.5 ? `，放量 ${t.effortRatio.toFixed(1)} 倍` : '';
       let text: string, tone: AnnTone, lines: string[];
       if (t.kind === 'false') {
         text = up ? '假突破' : '假跌破';
         tone = up ? 'short' : 'long';
-        const first = t.confirmTs != null
-          ? `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘只${up ? '高' : '低'} ${fmt(Math.abs(t.close - t.level))}，没站稳；${when(t.confirmTs)} 收回到 ${fmt(t.confirmClose!)}${vol}。`
-          : `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘 ${fmt(t.close)} 又回到${up ? '下面' : '上面'}${vol}。`;
+        // 冲进区里到收回之前有几根
+        const inBars = t.confirmTs != null ? Math.round((t.confirmTs - t.ts) / barMs) : 0;
+        const overClose = up ? t.close > t.level : t.close < t.level;
+        let first: string;
+        if (t.confirmTs == null) {
+          first = `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘 ${fmt(t.close)} 又回到${up ? '下面' : '上面'}${vol}。`;
+        } else if (inBars <= 1 && overClose) {
+          first = `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘只${up ? '高' : '低'} ${fmt(Math.abs(t.close - t.level))}，没站稳；${when(t.confirmTs)} 收回到 ${fmt(t.confirmClose!)}${vol}。`;
+        } else {
+          const lo = t.inLo ?? t.close, hi = t.inHi ?? t.close;
+          const span = inBars > 1 ? `${when(t.ts)}–${when(t.confirmTs - barMs)}` : when(t.ts);
+          first = `${span} 收在 ${hi > lo ? `${fmt(lo)}–${fmt(hi)}` : fmt(lo)}，${up ? '最高冲到' : '最低跌到'} ${fmt(t.extreme)}，没站${up ? '稳' : '住'}；${when(t.confirmTs)} 收回 ${fmt(t.confirmClose!)}${vol}。`;
+        }
         const r = t.retests.at(-1);
         const role = box ? (up ? '箱顶' : '箱底') : up ? '压力' : '支撑';
         const second = r
           ? `${when(r.ts)} 再${up ? '冲到' : '跌到'} ${fmt(r.extreme)} 也收了回来 → 这一带是${role}。`
-          : `之后收盘${up ? '站上' : '跌破'} ${fmtR(t.extreme)} → 这次不算。`;
+          : `之后收盘${up ? '站上' : '跌破'} ${fmtR(t.extreme)} 才算真${up ? '突破' : '跌破'}。`;
         lines = [first, second];
       } else {
         const failed = !!t.reclaim?.now;
         text = failed ? (up ? '突破又跌回' : '跌破又收回') : up ? '突破' : '跌破';
         tone = failed ? 'neck' : up ? 'long' : 'short';
+        const rc = t.reclaim;
         const multi = names.length + (t.touches >= 2 ? 1 : 0) >= 2;
-        // 「先假后真」只说紧挨着的（6 根以内）；隔得久的只提一句那次收回来过
+        // 同一根一起被越过的几层
+        const layers = [...new Set(L.tests.filter(o => o.kind === 'break' && o.ts === t.ts && o.side === t.side).map(o => o.level))]
+          .sort((a, b) => (up ? a - b : b - a));
+        const verb = layers.length >= 2
+          ? `一根${up ? '站上' : '跌穿'} ${layers.map(fmtR).join('、')} ${countWord(layers.length)}层`
+          : `收盘${up ? '站上' : '跌穿'}`;
+        // 「先假后真」只说紧挨着的（6 根以内）；后来又收回去了就不说谁占上风
         const ff = t.falseFirstTs;
         const close = ff != null && t.ts - ff <= 6 * barMs;
         const first = close
-          ? `${when(ff)} 先${up ? '冲上去' : '刺下去'}又收回，${when(t.ts)} 收盘${up ? '站上' : '跌穿'} —— 先假后真，${up ? '多头' : '空头'}占上风。`
-          : `${when(t.ts)} 收盘${up ? '站上' : '跌穿'}${multi ? `，几层${up ? '压力一起被突破' : '支撑一起被打掉'}` : ''}${vol}${ff != null ? `；${when(ff)} 那次${up ? '冲上去' : '跌下去'}还收回来过` : ''}。`;
-        const rc = t.reclaim;
+          ? `${when(ff)} 先${up ? '冲上去' : '刺下去'}又收回，${when(t.ts)} ${verb}${rc ? '' : ` —— 先假后真，${up ? '多头' : '空头'}占上风`}。`
+          : `${when(t.ts)} ${verb}${layers.length < 2 && multi ? `，几层${up ? '压力一起被突破' : '支撑一起被打掉'}` : ''}${vol}${ff != null && layers.length < 2 ? `；${when(ff)} 那次${up ? '冲上去' : '跌下去'}还收回来过` : ''}。`;
+        // 之后反弹到哪 / 回落到哪
+        const after = report.recent.filter(b => b.ts > t.ts);
+        const swingBack = after.length ? (up ? Math.min(...after.map(b => b.l)) : Math.max(...after.map(b => b.h))) : null;
         const span = rc ? (rc.count === 1 ? when(rc.firstTs) : `${when(rc.firstTs)}–${when(rc.lastTs)}`) : '';
         // 现价已经离这条线超过 1 个波动单位（顺着突破 / 跌破的方向）：回抽没站住，仍然有效
         const away = up ? price - t.level > unit : t.level - price > unit;
         const second = !rc
-          ? `${up ? '回落跌不回' : '反弹收不回'} ${lv} ${up ? '下面' : '上面'}，${up ? '突破' : '跌破'}就还有效。`
+          ? swingBack != null
+            ? `之后${up ? '最低回落到' : '最高反弹到'} ${fmt(swingBack)}，没回到 ${backLv} ${up ? '下面' : '上面'} → ${up ? '突破' : '跌破'}还有效。`
+            : `${up ? '回落跌不回' : '反弹收不回'} ${backLv} ${up ? '下面' : '上面'}，${up ? '突破' : '跌破'}就还有效。`
           : rc.now
-            ? `${when(rc.firstTs)} 起收回 ${lv} ${up ? '下面' : '上面'} → 这次${up ? '突破' : '跌破'}失败了。`
+            ? `${when(rc.firstTs)} 起收回 ${backLv} ${up ? '下面' : '上面'} → 这次${up ? '突破' : '跌破'}失败了。`
             : inBox(t.level)
               ? `${span} 又收回${up ? '下面' : '上面'} ${rc.count} 根，然后又${up ? '站了上去' : '掉了下来'}；这条线现在夹在箱子中间，分量变轻。`
               : away
@@ -423,7 +482,7 @@ export function projectFrameworkMarks(
         text: prefs.labels ? text : '',
         priority: t.kind === 'break' ? 80 : 78,
         marker: t.kind === 'break' ? 'diamond' : 'tri',
-        title: `${text} · ${lv}（${what}）`,
+        title: `${text} · ${zone}（${what}）`,
         detail: lines,
         // 刺穿那根没收回、后面才收回：小尾巴指到收回那根
         ...(t.confirmTs != null && t.confirmTs > t.ts ? { confirmTs: t.confirmTs } : {}),

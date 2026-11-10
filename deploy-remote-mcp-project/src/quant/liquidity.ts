@@ -307,34 +307,43 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
 }
 
 /**
- * 图上统一的四种事件：突破 / 跌破（收盘越过缓冲带）与假突破 / 假跌破（刺穿后收盘收回）。
- * 每个已确认的摆动高低点（左 8 右 5）只看确认之后的第一次测试；单个摆动也算，touches 只用来说分量。
- * · 刺穿那根收盘正好卡在价位和缓冲带之间：等后面 3 根收盘来定 —— 收回 → 假（标在刺穿那根，confirmTs 指向收回那根），
- *   越过缓冲 → 真（标在越过那根）。
- * · 假的之后 3 根内又被收盘越过：并成一次真突破 / 真跌破（falseFirstTs = 那次假的）。更晚才越过同样并进去。
- * · 同一价位后来又被刺穿收回：记进 retests，不再另画一个。
- * · 真的之后收盘又回到原来那一侧（越过缓冲）：记进 reclaim；now = 最新一根收盘仍在原来那一侧（这次突破 / 跌破失败）。
+ * 图上统一的四种事件：突破 / 跌破 与 假突破 / 假跌破。按「价位区」算，不按单个高低点算：
+ * 已确认的摆动高低点（左 8 右 5）里，价格挨得很近（同一组等高 / 等低）的合成一个区，一个区一次只出一个事件。
+ * · 突破 = 收盘越过区的外沿 + 0.1 个平均波动；
+ * · 假突破 = 刺穿外沿至少 0.2 个平均波动后收盘回到区的另一边；刺穿那根收盘卡在区里时等后面 6 根来定；
+ * · 突破之后 6 根内收盘又回到区的另一边（越过 0.1 个平均波动）= 突破失败，也算假突破，标在冲进区里的第一根，
+ *   confirmTs 指向收回那根；更晚才收回的记进 reclaim（now = 最新一根收盘仍在原来那一侧）；
+ * · 假的之后又被收盘越过：变成一次真突破（falseFirstTs = 那次假的）；之后又刺穿又收回：记进 retests。
  */
 export interface LevelTest {
   kind: 'break' | 'false';
-  /** above = 测试的是高点（突破 / 假突破）；below = 低点（跌破 / 假跌破） */
+  /** above = 测试的是高点区（突破 / 假突破）；below = 低点区（跌破 / 假跌破） */
   side: 'above' | 'below';
+  /** 要越过的那条边：高点区取上沿，低点区取下沿 */
   level: number;
-  /** 被测试的摆动点所在 K 线 */
+  /** 区的上下沿（单个高低点时两者相等；没有时按 level） */
+  zoneLo?: number;
+  zoneHi?: number;
+  /** 区里最近那个高低点所在 K 线 */
   levelTs: number;
-  /** 测试那一刻同价位还没破的摆动点个数（≥1） */
+  /** 区里有几个高低点（≥1） */
   touches: number;
-  /** 标记所在 K 线：假 = 刺穿那根；真 = 收盘越过那根 */
+  /** 标记所在 K 线：假 = 冲进区里的第一根；真 = 收盘越过那根 */
   ts: number;
   idx: number;
   ageBars: number;
-  /** 标记那根的影线极值（刺得最远的价） */
+  /** 这一段冲得最远的价 */
   extreme: number;
   /** 标记那根的收盘价 */
   close: number;
-  /** 假：刺穿那根没收回、后面才收回时，收回那根的开盘时间与收盘价 */
+  /** 假：后面才收回时，收回那根的开盘时间与收盘价 */
   confirmTs: number | null;
   confirmClose: number | null;
+  /** 假：冲进区里到收回之前那几根的收盘价范围 */
+  inLo?: number;
+  inHi?: number;
+  /** 假：中间曾收盘越过外沿（突破失败）的那根；只是刺穿收回则为 null */
+  brokeTs?: number | null;
   effortRatio: number | null;
   /** 真：之前那次假的时间（先假后真） */
   falseFirstTs: number | null;
@@ -353,7 +362,21 @@ export interface RecentSwing {
   broken: boolean;
 }
 
-const RESOLVE_BARS = 3;
+/** 刺穿后收盘卡在区里，最多等几根来定真假；突破后几根内收回算突破失败 */
+export const RESOLVE_BARS = 6;
+export const FAIL_BARS = 6;
+
+interface Zone {
+  lo: number;
+  hi: number;
+  members: ConfirmedLevel[];
+  state: 'idle' | 'pending' | 'broken' | 'false';
+  /** 冲进区里的第一根（还没出事件时，一离开区就重置） */
+  enter: number;
+  pierce: number;
+  breakIdx: number;
+  ev: LevelTest | null;
+}
 
 export function levelTests(ctx: Ctx, lookback = FRESH_EVENT_BARS, minDepthAtr = 0.2): LevelTest[] {
   const { cs, n } = ctx;
@@ -361,88 +384,136 @@ export function levelTests(ctx: Ctx, lookback = FRESH_EVENT_BARS, minDepthAtr = 
   if (to < 1) return [];
   const windowStart = Math.max(0, to - Math.max(1, Math.floor(lookback)) + 1);
   // 与结构事件同一回看（findSwingLevels 默认 576 根）：今天早些时候的高低点今天下午被破也要看得到
-  const levels = confirmedLevels(ctx, 576);
+  const levels = confirmedLevels(ctx, 576).filter(l => !(l.breakIdx != null && l.breakIdx <= l.confirmedIdx));
   const effort = (q: number) => (ctx.volMa[q] > 0 ? r3(ctx.vols[q] / ctx.volMa[q]) : null);
   const out: LevelTest[] = [];
-  for (const lv of levels) {
-    if (lv.breakIdx != null && lv.breakIdx <= lv.confirmedIdx) continue;
-    const top = lv.side === 'top';
-    const tol = levelTol(ctx, lv);
-    const peers = levels.filter(p => p.side === lv.side && Math.abs(p.price - lv.price) <= Math.min(tol, levelTol(ctx, p)));
-    const touchesAt = (q: number) => Math.max(1, peers.filter(p => p.idx < q && p.confirmedIdx < q && (p.breakIdx == null || p.breakIdx >= q)).length);
-    const beyondAt = (q: number) => (top ? cs[q].c > lv.price + 0.1 * scaleOf(ctx, q) : cs[q].c < lv.price - 0.1 * scaleOf(ctx, q));
-    const insideAt = (q: number) => (top ? cs[q].c < lv.price : cs[q].c > lv.price);
-    const pierceAt = (q: number) => (top ? cs[q].h - lv.price : lv.price - cs[q].l);
-    const extremeAt = (q: number) => (top ? cs[q].h : cs[q].l);
-    let falseTest: LevelTest | null = null;
-    let breakTest: LevelTest | null = null;
-    let pendingPierce = -1;
-    for (let q = lv.confirmedIdx + 1; q <= to; q++) {
-      const a = scaleOf(ctx, q);
-      if (breakTest) {
-        // 越过之后：收盘回到原来那一侧（越过缓冲）的根数
-        const back = top ? cs[q].c < lv.price - 0.1 * a : cs[q].c > lv.price + 0.1 * a;
-        if (back) {
-          const r = breakTest.reclaim ?? { count: 0, firstTs: cs[q].ts, lastTs: cs[q].ts, now: false };
-          r.count++;
-          r.lastTs = cs[q].ts;
-          breakTest.reclaim = r;
-        }
-        continue;
+  for (const top of [true, false]) {
+    const side: 'above' | 'below' = top ? 'above' : 'below';
+    const mine = levels.filter(l => (l.side === 'top') === top).sort((a, b) => a.confirmedIdx - b.confirmedIdx || a.idx - b.idx);
+    if (!mine.length) continue;
+    const zones: Zone[] = [];
+    let k = 0;
+    const edge = (z: Zone) => (top ? z.hi : z.lo);
+    const far = (q: number) => (top ? cs[q].h : cs[q].l);
+    const make = (z: Zone, kind: LevelTest['kind'], at: number): LevelTest => {
+      const last = z.members.reduce((x, y) => (y.idx > x.idx ? y : x));
+      return {
+        kind, side, level: edge(z), zoneLo: z.lo, zoneHi: z.hi, levelTs: last.ts, touches: z.members.length,
+        ts: cs[at].ts, idx: at, ageBars: to - at, extreme: far(at), close: cs[at].c, confirmTs: null, confirmClose: null,
+        brokeTs: null, effortRatio: effort(at), falseFirstTs: null, retests: [], reclaim: null,
+      };
+    };
+    /** 从 start 冲进区里、到 end 收回：一整段算一次假突破 / 假跌破 */
+    const falseRun = (z: Zone, start: number, end: number, brokeAt: number | null, keep: LevelTest | null): LevelTest => {
+      const ev = make(z, 'false', start);
+      let ext = far(start), inLo = Infinity, inHi = -Infinity;
+      for (let i = start; i <= end; i++) {
+        ext = top ? Math.max(ext, cs[i].h) : Math.min(ext, cs[i].l);
+        if (i < end) { inLo = Math.min(inLo, cs[i].c); inHi = Math.max(inHi, cs[i].c); }
       }
-      if (beyondAt(q)) {
-        breakTest = {
-          kind: 'break', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(q),
-          ts: cs[q].ts, idx: q, ageBars: to - q, extreme: extremeAt(q), close: cs[q].c, confirmTs: null, confirmClose: null,
-          effortRatio: effort(q), falseFirstTs: falseTest?.ts ?? null, retests: [], reclaim: null,
-        };
-        pendingPierce = -1;
-        continue;
+      ev.extreme = ext;
+      if (end > start) {
+        ev.confirmTs = cs[end].ts;
+        ev.confirmClose = cs[end].c;
+        ev.inLo = inLo;
+        ev.inHi = inHi;
       }
-      if (pendingPierce >= 0) {
-        if (insideAt(q)) {
-          if (!falseTest) {
-            falseTest = {
-              kind: 'false', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(pendingPierce),
-              ts: cs[pendingPierce].ts, idx: pendingPierce, ageBars: to - pendingPierce, extreme: extremeAt(pendingPierce),
-              close: cs[pendingPierce].c, confirmTs: cs[q].ts, confirmClose: cs[q].c, effortRatio: effort(pendingPierce),
-              falseFirstTs: null, retests: [], reclaim: null,
-            };
-          } else {
-            falseTest.retests.push({ ts: cs[pendingPierce].ts, extreme: extremeAt(pendingPierce) });
-          }
-          pendingPierce = -1;
-        } else if (q - pendingPierce >= RESOLVE_BARS) {
-          pendingPierce = -1; // 一直卡在价位附近：不算假也不算真
-        }
-        continue;
-      }
-      if (pierceAt(q) >= minDepthAtr * a) {
-        if (insideAt(q)) {
-          if (!falseTest) {
-            falseTest = {
-              kind: 'false', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(q),
-              ts: cs[q].ts, idx: q, ageBars: to - q, extreme: extremeAt(q), close: cs[q].c, confirmTs: null, confirmClose: null,
-              effortRatio: effort(q), falseFirstTs: null, retests: [], reclaim: null,
-            };
-          } else {
-            falseTest.retests.push({ ts: cs[q].ts, extreme: extremeAt(q) });
-          }
+      ev.brokeTs = brokeAt == null ? null : cs[brokeAt].ts;
+      ev.effortRatio = effort(brokeAt ?? start);
+      if (keep) ev.retests = keep.retests;
+      return ev;
+    };
+    for (let q = mine[0].confirmedIdx + 1; q <= to; q++) {
+      // 这一根之前确认的高低点：并进价格挨着、还没被突破的区，否则另起一个区
+      while (k < mine.length && mine[k].confirmedIdx < q) {
+        const lv = mine[k++];
+        const tol = levelTol(ctx, lv);
+        const z = zones.find(x => (x.state === 'idle' || x.state === 'false') &&
+          Math.max(x.hi, lv.price) - Math.min(x.lo, lv.price) <= tol);
+        if (z) {
+          z.members.push(lv);
+          z.lo = Math.min(z.lo, lv.price);
+          z.hi = Math.max(z.hi, lv.price);
         } else {
-          pendingPierce = q;
+          zones.push({ lo: lv.price, hi: lv.price, members: [lv], state: 'idle', enter: -1, pierce: -1, breakIdx: -1, ev: null });
+        }
+      }
+      const c = cs[q];
+      const a = scaleOf(ctx, q);
+      for (const z of zones) {
+        const touched = top ? c.h >= z.lo : c.l <= z.hi;
+        const over = top ? c.h - z.hi : z.lo - c.l;
+        const beyond = top ? c.c > z.hi + 0.1 * a : c.c < z.lo - 0.1 * a;
+        const inside = top ? c.c < z.lo : c.c > z.hi;
+        const backBuf = top ? c.c < z.lo - 0.1 * a : c.c > z.hi + 0.1 * a;
+        if (z.state === 'idle' || z.state === 'false') {
+          if (z.state === 'idle') {
+            if (touched && z.enter < 0) z.enter = q;
+            if (!touched) z.enter = -1;
+          }
+          if (beyond) {
+            const prior = z.state === 'false' ? z.ev : null;
+            z.ev = make(z, 'break', q);
+            z.ev.falseFirstTs = prior?.ts ?? null;
+            if (prior) z.ev.retests = prior.retests;
+            z.breakIdx = q;
+            if (z.enter < 0) z.enter = q;
+            z.state = 'broken';
+          } else if (over >= minDepthAtr * a) {
+            if (z.state === 'false') {
+              if (inside) z.ev!.retests.push({ ts: c.ts, extreme: far(q) });
+            } else if (inside) {
+              z.ev = falseRun(z, z.enter >= 0 ? z.enter : q, q, null, null);
+              // 只有刺穿那一根、它自己就收回：标在那根，不画小尾巴
+              if (z.ev.idx === q) { z.ev.confirmTs = null; z.ev.confirmClose = null; }
+              z.state = 'false';
+            } else {
+              z.pierce = q;
+              z.state = 'pending';
+            }
+          }
+          continue;
+        }
+        if (z.state === 'pending') {
+          if (beyond) {
+            z.ev = make(z, 'break', q);
+            z.breakIdx = q;
+            z.state = 'broken';
+          } else if (inside) {
+            z.ev = falseRun(z, z.enter >= 0 ? z.enter : z.pierce, q, null, null);
+            z.state = 'false';
+          } else if (q - z.pierce >= RESOLVE_BARS) {
+            z.state = 'idle'; // 一直卡在区里：不算假也不算真
+            z.enter = -1;
+          }
+          continue;
+        }
+        // 已经突破 / 跌破
+        if (backBuf) {
+          if (q - z.breakIdx <= FAIL_BARS && !z.ev!.reclaim) {
+            const prior = z.ev!.falseFirstTs != null ? z.ev : null;
+            const start = z.enter >= 0 ? Math.min(z.enter, z.breakIdx) : z.breakIdx;
+            z.ev = falseRun(z, start, q, z.breakIdx, prior);
+            z.state = 'false';
+          } else {
+            const r = z.ev!.reclaim ?? { count: 0, firstTs: c.ts, lastTs: c.ts, now: false };
+            r.count++;
+            r.lastTs = c.ts;
+            z.ev!.reclaim = r;
+          }
         }
       }
     }
-    const ev = breakTest ?? falseTest;
-    if (!ev || ev.idx < windowStart) continue;
-    if (breakTest?.reclaim) {
-      const last = cs[to];
-      const a = scaleOf(ctx, to);
-      breakTest.reclaim.now = top ? last.c < lv.price - 0.1 * a : last.c > lv.price + 0.1 * a;
+    const last = cs[to];
+    const aTo = scaleOf(ctx, to);
+    for (const z of zones) {
+      const ev = z.ev;
+      if (!ev || ev.idx < windowStart) continue;
+      if (ev.kind === 'break' && ev.reclaim) ev.reclaim.now = top ? last.c < z.lo - 0.1 * aTo : last.c > z.hi + 0.1 * aTo;
+      out.push(ev);
     }
-    out.push(ev);
   }
-  // 同一根上被测试的几个价位都保留：挑哪个来说（亚盘价、碰过几次）由图层决定
+  // 同一根上被测试的几个区都保留：挑哪个来说（亚盘价、碰过几次）由图层决定
   return out.sort((a, b) => b.idx - a.idx || b.touches - a.touches);
 }
 

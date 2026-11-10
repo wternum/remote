@@ -107,7 +107,7 @@ export function trendOf(report: FrameworkReport): Trend {
   if (up.length) parts.push(`${join(up)}${up.length > 1 ? '都' : ''}在涨`);
   if (flat.length) {
     const onlyBase = flat.length === 1 && base && flat[0].tf === base.tf && dir !== 0;
-    parts.push(onlyBase ? `${tfWord(base.tf)}在喘口气` : `${join(flat)}${dir !== 0 ? '还' : ''}在震荡`);
+    if (!onlyBase) parts.push(`${join(flat)}${dir !== 0 ? '还' : ''}在震荡`);
   }
   const head = dir < 0 ? '大方向向下' : dir > 0 ? '大方向向上' : '方向不清';
   return { dir, text: `${head}：${parts.join('，')}` };
@@ -256,11 +256,34 @@ export function buildScene(report: FrameworkReport, items: readonly BandItem[], 
     for (const s of report.liquidity.swings) {
       if (s.side === side && s.ts >= from && !s.broken && inBand(b, s.price)) map.set(s.ts, { ts: s.ts, price: s.price });
     }
-    for (const t of tests) {
-      if (t.kind === 'false' && t.side === side && t.ts >= from && inBand(b, t.extreme, 0.3)) map.set(t.ts, { ts: t.ts, price: t.extreme });
+    // 用全部测试（不只是挑出来画的那几个）：同一根上被跌破盖住的假跌破也是一次碰带
+    for (const t of report.liquidity.tests) {
+      if (t.kind !== 'false' || t.side !== side || t.ts < from) continue;
+      // 插针：冲得再远，说的也是被测试的那个区
+      const edgeOf = side === 'above' ? t.zoneHi ?? t.level : t.zoneLo ?? t.level;
+      if (inBand(b, t.extreme, 0.3)) map.set(t.ts, { ts: t.ts, price: t.extreme });
+      else if (inBand(b, edgeOf, 0.3)) map.set(t.ts, { ts: t.ts, price: edgeOf });
+    }
+    const up = side === 'above';
+    const recent = report.recent;
+    for (let i = Math.max(1, recent.length - 5); i < recent.length; i++) {
+      const r = recent[i], prev = recent[i - 1];
+      const ext = up ? r.h : r.l;
+      const near = up ? ext >= b.lo - 0.2 * unit && ext <= b.hi : ext <= b.hi + 0.2 * unit && ext >= b.lo;
+      const backOut = up ? r.c < b.lo : r.c > b.hi;
+      // 前一根还在带外面，这一根才是「又来碰了一次」；一直在带里磨的不重复算
+      const fresh = up ? prev.h < b.lo - 0.2 * unit : prev.l > b.hi + 0.2 * unit;
+      const dup = [...map.values()].some(t => Math.abs(t.ts - r.ts) <= 2 * barMs);
+      if (near && backOut && fresh && !dup) map.set(r.ts, { ts: r.ts, price: ext });
     }
     return [...map.values()].sort((x, y) => x.ts - y.ts);
   };
+  const widen = (b: Band | null, list: Touch[]) => {
+    if (!b) return;
+    for (const t of list) { b.lo = Math.min(b.lo, t.price); b.hi = Math.max(b.hi, t.price); }
+  };
+  const touchP = touchesOf(P, 'above'), touchS = touchesOf(S, 'below');
+  if (!box) { widen(P, touchP); widen(S, touchS); }
 
   const pokeOf = (b: Band | null, up: boolean): Touch | null => {
     if (!b) return null;
@@ -273,7 +296,7 @@ export function buildScene(report: FrameworkReport, items: readonly BandItem[], 
 
   return {
     price, unit, bands, P, S, nextUp, nextDown, box,
-    touchP: touchesOf(P, 'above'), touchS: touchesOf(S, 'below'),
+    touchP, touchS,
     pokeP: P && !P.inside ? pokeOf(P, true) : null,
     pokeS: S && !S.inside ? pokeOf(S, false) : null,
     tests,
@@ -315,10 +338,10 @@ export function durationText(ms: number): string {
 /** 「19:15、19:45」 */
 const timesOf = (list: readonly Touch[], when: (ts: number) => string) => list.map(t => when(t.ts)).join('、');
 
-/** 「下面 84.12–84.18 是 19:00、19:30 两次跌下去又收回来的地方」 */
+/** 「下面 84.52–84.55 是 20:30、21:15 两次跌下去又弹回来的地方」 */
 function supportWhat(S: Band, touches: readonly Touch[], read: ReadInput): string {
   const r = bandRange(S, read.fmtR);
-  if (touches.length) return `下面 ${r} 是 ${timesOf(touches, read.when)}${touches.length > 1 ? ` ${countWord(touches.length)}次` : ' '}跌下去又收回来的地方`;
+  if (touches.length) return `下面 ${r} 是 ${timesOf(touches, read.when)}${touches.length > 1 ? ` ${countWord(touches.length)}次` : ' '}跌下去又弹回来的地方`;
   return `下面先看${sp(bandShort(S, read.fmtR))}`;
 }
 
@@ -341,7 +364,8 @@ export function readMarket(read: ReadInput): MarketRead {
   const breakText = breaks.map((t, i) => {
     const up = t.side === 'above';
     const names = refNamesAt(refs, t.level, unit);
-    const verb = i === 1 && breaks[0].side === t.side ? `又${up ? '突破' : '跌破'}` : `收盘${up ? '突破' : '跌破'}`;
+    const layers = new Set(report.liquidity.tests.filter(o => o.kind === 'break' && o.ts === t.ts && o.side === t.side).map(o => o.level)).size;
+    const verb = i === 1 && breaks[0].side === t.side ? `又${up ? '突破' : '跌破'}` : layers >= 2 ? `一根${up ? '站上' : '跌穿'}` : `收盘${up ? '突破' : '跌破'}`;
     return `${when(t.ts)} ${verb}${names.length ? names.join('、') : ''} ${fmtR(t.level)}`;
   }).join('，');
 
@@ -370,22 +394,41 @@ export function readMarket(read: ReadInput): MarketRead {
   }
 
   // ── 趋势：跟大方向，刚发生的反向突破 / 跌破会让我先停一停 ──
-  const fresh = lastBreak && report.lastTs - lastBreak.ts <= 24 * barMs ? testDir(lastBreak) : 0;
+  const lastFalse = scene.tests.filter(t => t.kind === 'false').sort((a, b) => b.ts - a.ts)[0] ?? null;
+  const latest = [lastBreak, lastFalse].filter((t): t is LevelTest => !!t).sort((a, b) => b.ts - a.ts)[0] ?? null;
+  // 反方向的真突破 / 跌破 24 根内都让我先停一停；反方向的假突破 / 假跌破只是短线反弹，6 根以后不再挡大方向
+  const age = latest ? report.lastTs - latest.ts : Infinity;
+  const fresh = latest && age <= (latest.kind === 'false' ? 6 : 24) * barMs ? testDir(latest) : 0;
   const verdict: MarketRead['verdict'] = trend.dir !== 0 && fresh !== -trend.dir ? (trend.dir > 0 ? '偏多' : '偏空') : '观望';
   lines.push(`${trend.text}。${breakText ? `${breakText}。` : ''}`);
+  // 顺着大方向的假突破（下跌里冲高失败）24 根内都值得说；逆着大方向的只说刚发生的（6 根内），其余交给支撑 / 压力那句
+  const falseAge = lastFalse ? report.lastTs - lastFalse.ts : Infinity;
+  const withTrend = lastFalse != null && (trend.dir === 0 || testDir(lastFalse) === trend.dir);
+  if (lastFalse && latest === lastFalse && falseAge <= (withTrend ? 24 : 6) * barMs) {
+    const up = lastFalse.side === 'above';
+    const zLo = lastFalse.zoneLo ?? lastFalse.level, zHi = lastFalse.zoneHi ?? lastFalse.level;
+    const zone = zHi > zLo ? `${fmtR(zLo)}–${fmtR(zHi)}` : fmtR(lastFalse.level);
+    const side = up ? (trend.dir < 0 ? '，空头还占上风' : '') : (trend.dir > 0 ? '，多头还占上风' : '');
+    lines.push(lastFalse.brokeTs != null && lastFalse.confirmTs != null
+      ? `${when(lastFalse.ts)} 往${up ? '上冲过' : '下跌破'} ${zone} 没站${up ? '稳' : '住'}，${when(lastFalse.confirmTs)} 收回${up ? '下面' : '上面'} —— ${up ? '突破' : '跌破'}失败${side}。`
+      : `${when(lastFalse.ts)} ${up ? '冲过' : '跌破'} ${zone} 又收回${up ? '下面' : '上面'} —— ${up ? '假突破' : '假跌破'}${side}。`);
+  }
 
   // 现在在哪
   const dP = P ? (P.inside ? 0 : P.lo - price) : Infinity;
   const dS = S ? (S.inside ? 0 : price - S.hi) : Infinity;
   const atP = !!P && (dP <= 0.5 * unit || !!scene.pokeP);
   const atS = !!S && (dS <= 0.5 * unit || !!scene.pokeS);
-  const parts = (b: Band) => b.items.map(i => i.short).join('、');
   if (P && atP && (verdict !== '偏多' || !atS)) {
     const poke = scene.pokeP ? `，${when(scene.pokeP.ts)} 冲到 ${read.fmt(scene.pokeP.price)} 没收上去` : '';
-    lines.push(`现在 ${now} 已经顶到压力带 ${bandRange(P, fmtR)}（${parts(P)}）${poke}。`);
+    lines.push(P.inside
+      ? `现在 ${now} 已经在压力带 ${bandRange(P, fmtR)} 里${poke}。`
+      : `现在 ${now} 贴着压力带 ${bandRange(P, fmtR)} 的下沿${poke}。`);
   } else if (S && atS) {
-    const poke = scene.pokeS ? `，${when(scene.pokeS.ts)} 跌到 ${read.fmt(scene.pokeS.price)} 又收了回来` : '';
-    lines.push(`现在 ${now} 已经落到支撑带 ${bandRange(S, fmtR)}（${parts(S)}）${poke}。`);
+    const poke = scene.pokeS ? `，${when(scene.pokeS.ts)} 跌到 ${read.fmt(scene.pokeS.price)} 又弹了回来` : '';
+    lines.push(S.inside
+      ? `现在 ${now} 已经在支撑带 ${bandRange(S, fmtR)} 里${poke}。`
+      : `现在 ${now} 贴着支撑带 ${bandRange(S, fmtR)} 的上沿${poke}。`);
   } else {
     const where = [P ? `上面压力带 ${bandRange(P, fmtR)} 还差 ${pctAway(P.lo, price)}` : '', S ? `下面支撑带 ${bandRange(S, fmtR)} 还差 ${pctAway(S.hi, price)}` : ''].filter(Boolean);
     lines.push(`现在 ${now}${where.length ? `：${where.join('，')}` : ''}。`);

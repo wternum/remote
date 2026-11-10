@@ -24,6 +24,7 @@ import {
   type BarLike,
 } from './sessionMath';
 import { getSessionStore, type SessionPreferences } from './sessionStore';
+import { getFrameworkMarkStore } from '../frameworkMarkStore';
 import { fmtClock } from '../../lib/displayTime';
 
 export const SESSION_UNDER_ID = 'pd-session-under';
@@ -103,10 +104,12 @@ function getAsiaSummaries(bars: readonly BarLike[], range: { minMs: number; maxM
     bars.length,
     bars[0]?.time ?? 0,
     prev?.time ?? 0,
-    prev?.close ?? 0,
+    prev?.high ?? 0,
+    prev?.low ?? 0,
     prev?.confirm ?? '',
     last?.time ?? 0,
-    last?.close ?? 0,
+    last?.high ?? 0,
+    last?.low ?? 0,
     last?.confirm ?? '',
     range.minMs,
     range.maxMs,
@@ -397,7 +400,8 @@ function renderSessionOver(canvas: HTMLCanvasElement | null, args: RendererLayer
 
   // 2. AH / AL：扫荡菱形标记。右侧价格标签改由四框架图层的右侧轨道统一排版
   //    （asiaRail.ts：只给仍有效的价位、写明今日 / 昨日、与前高前低互相避让并可悬停）。
-  if (prefs.showAsiaRange) {
+  //    图表标注开着时不画：同一个位置已经有带亚盘名字的「跌破 / 假跌破」标记，菱形没有说明、颜色还容易看混。
+  if (prefs.showAsiaRange && !getFrameworkMarkStore().getSnapshot().enabled) {
     const asiaSummaries = getAsiaSummaries(bars, range);
     for (const ar of asiaSummaries) {
       const ahEndX = X(ar.highLineEndMs);
