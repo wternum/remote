@@ -4,7 +4,7 @@
 //  由同一个图层统一合并、排版、避让后绘制。
 // ─────────────────────────────────────────────────────────────
 
-export type AnnTone = 'top' | 'bottom' | 'neck' | 'entry' | 'stop' | 'target' | 'zone' | 'warn' | 'long' | 'short';
+export type AnnTone = 'top' | 'bottom' | 'neck' | 'entry' | 'stop' | 'target' | 'zone' | 'warn' | 'long' | 'short' | 'asia';
 
 /** 主次：focus = 当前选中信号；read = 当前订单流判读；normal = 有效关键位；faint = 历史/已破 */
 export type AnnRank = 'focus' | 'read' | 'normal' | 'faint';
@@ -27,8 +27,14 @@ export interface AnnLevel {
   label: boolean;
   /** 实色底标签（入场 / 止损 / 目标） */
   solid?: boolean;
-  /** 悬停卡片内容 */
+  /** 悬停卡片内容；以「（」开头的行按灰色小字显示 */
   detail?: string[];
+  /** 右侧标签里价格后面的补充短字，例如「（还差 2 根）」；放不下时先省略它 */
+  note?: string;
+  /** 只在右侧轨道显示标签与悬停，不画水平线（线由别的图层负责，如亚盘高低点） */
+  railOnly?: boolean;
+  /** 价位带（压力带 / 支撑带）：右侧标签写成「lo–hi」，price 是离现价最近的那条边 */
+  range?: [number, number];
 }
 
 export interface AnnEvent {
@@ -107,6 +113,7 @@ export const TONE_COLOR: Record<AnnTone, string> = {
   zone: '#37c8dd',
   entry: '#f0b90b',
   warn: '#f0b90b',
+  asia: '#a78bfa',
 };
 
 export const decimalsFor = (price: number) => {

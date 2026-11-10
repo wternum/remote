@@ -224,18 +224,20 @@ export function classifyPhase(ctx: Ctx, lookback = 160, springs = findSprings(ct
 }
 
 /**
- * One impulsive leg often leaves several overlapping three-candle gaps (e.g. 87.52–87.69
- * and 87.41–87.46 from consecutive bearish bars). Shown separately, the projection's
- * "nearest 3" picks the thin sliver and hides the main gap. Same-direction gaps whose
- * three-candle windows overlap are one imbalance: union their price range. Callers pass
- * only still-open gaps, so a filled part never widens the zone; touched = any part touched.
+ * One impulsive leg often leaves several overlapping three-candle gaps. Same-direction gaps
+ * whose three-candle windows overlap AND whose price ranges overlap or touch are one
+ * imbalance: union their price range. Gaps that are separated in price stay separate —
+ * the band between them was traded (e.g. SOL 11-10 15:10: 86.09–86.11 and 86.17–86.22,
+ * where 86.11–86.17 had trades), so a union would wrongly call it "几乎没成交".
+ * Nearby separate gaps are still described together by the chart's band grouping.
+ * Callers pass only still-open gaps, so a filled part never widens the zone.
  */
 export function mergeAdjacentFvgs(zones: readonly FvgZone[]): FvgZone[] {
   const sorted = [...zones].sort((a, b) => a.from - b.from);
   const out: FvgZone[] = [];
   for (const z of sorted) {
     const last = out[out.length - 1];
-    if (last && last.kind === z.kind && z.from <= last.to) {
+    if (last && last.kind === z.kind && z.from <= last.to && z.lo <= last.hi && z.hi >= last.lo) {
       const filled = last.filled && z.filled;
       out[out.length - 1] = {
         ...last,

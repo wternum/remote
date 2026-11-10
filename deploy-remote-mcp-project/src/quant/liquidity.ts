@@ -78,6 +78,10 @@ export interface LiquidityRead {
   structure: StructureEvent | null;
   structureTs: number | null;
   structureAgeBars: number | null;
+  /** 最近 48 根里的突破 / 跌破 / 假突破 / 假跌破（图上统一用这四个词） */
+  tests: LevelTest[];
+  /** 最近 160 根内已确认的摆动高低点 */
+  swings: RecentSwing[];
   bias: 1 | -1 | 0;
   strength: number;
   headline: string;
@@ -302,10 +306,158 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
     .slice(0, 4);
 }
 
+/**
+ * 图上统一的四种事件：突破 / 跌破（收盘越过缓冲带）与假突破 / 假跌破（刺穿后收盘收回）。
+ * 每个已确认的摆动高低点（左 8 右 5）只看确认之后的第一次测试；单个摆动也算，touches 只用来说分量。
+ * · 刺穿那根收盘正好卡在价位和缓冲带之间：等后面 3 根收盘来定 —— 收回 → 假（标在刺穿那根，confirmTs 指向收回那根），
+ *   越过缓冲 → 真（标在越过那根）。
+ * · 假的之后 3 根内又被收盘越过：并成一次真突破 / 真跌破（falseFirstTs = 那次假的）。更晚才越过同样并进去。
+ * · 同一价位后来又被刺穿收回：记进 retests，不再另画一个。
+ * · 真的之后收盘又回到原来那一侧（越过缓冲）：记进 reclaim；now = 最新一根收盘仍在原来那一侧（这次突破 / 跌破失败）。
+ */
+export interface LevelTest {
+  kind: 'break' | 'false';
+  /** above = 测试的是高点（突破 / 假突破）；below = 低点（跌破 / 假跌破） */
+  side: 'above' | 'below';
+  level: number;
+  /** 被测试的摆动点所在 K 线 */
+  levelTs: number;
+  /** 测试那一刻同价位还没破的摆动点个数（≥1） */
+  touches: number;
+  /** 标记所在 K 线：假 = 刺穿那根；真 = 收盘越过那根 */
+  ts: number;
+  idx: number;
+  ageBars: number;
+  /** 标记那根的影线极值（刺得最远的价） */
+  extreme: number;
+  /** 标记那根的收盘价 */
+  close: number;
+  /** 假：刺穿那根没收回、后面才收回时，收回那根的开盘时间与收盘价 */
+  confirmTs: number | null;
+  confirmClose: number | null;
+  effortRatio: number | null;
+  /** 真：之前那次假的时间（先假后真） */
+  falseFirstTs: number | null;
+  /** 假：后来又刺穿又收回的那几根 */
+  retests: { ts: number; extreme: number }[];
+  /** 真：之后收盘回到原来那一侧的根数 */
+  reclaim: { count: number; firstTs: number; lastTs: number; now: boolean } | null;
+}
+
+export interface RecentSwing {
+  side: 'above' | 'below';
+  price: number;
+  ts: number;
+  confirmedTs: number;
+  /** 之后被收盘越过缓冲带 */
+  broken: boolean;
+}
+
+const RESOLVE_BARS = 3;
+
+export function levelTests(ctx: Ctx, lookback = FRESH_EVENT_BARS, minDepthAtr = 0.2): LevelTest[] {
+  const { cs, n } = ctx;
+  const to = n - 1;
+  if (to < 1) return [];
+  const windowStart = Math.max(0, to - Math.max(1, Math.floor(lookback)) + 1);
+  // 与结构事件同一回看（findSwingLevels 默认 576 根）：今天早些时候的高低点今天下午被破也要看得到
+  const levels = confirmedLevels(ctx, 576);
+  const effort = (q: number) => (ctx.volMa[q] > 0 ? r3(ctx.vols[q] / ctx.volMa[q]) : null);
+  const out: LevelTest[] = [];
+  for (const lv of levels) {
+    if (lv.breakIdx != null && lv.breakIdx <= lv.confirmedIdx) continue;
+    const top = lv.side === 'top';
+    const tol = levelTol(ctx, lv);
+    const peers = levels.filter(p => p.side === lv.side && Math.abs(p.price - lv.price) <= Math.min(tol, levelTol(ctx, p)));
+    const touchesAt = (q: number) => Math.max(1, peers.filter(p => p.idx < q && p.confirmedIdx < q && (p.breakIdx == null || p.breakIdx >= q)).length);
+    const beyondAt = (q: number) => (top ? cs[q].c > lv.price + 0.1 * scaleOf(ctx, q) : cs[q].c < lv.price - 0.1 * scaleOf(ctx, q));
+    const insideAt = (q: number) => (top ? cs[q].c < lv.price : cs[q].c > lv.price);
+    const pierceAt = (q: number) => (top ? cs[q].h - lv.price : lv.price - cs[q].l);
+    const extremeAt = (q: number) => (top ? cs[q].h : cs[q].l);
+    let falseTest: LevelTest | null = null;
+    let breakTest: LevelTest | null = null;
+    let pendingPierce = -1;
+    for (let q = lv.confirmedIdx + 1; q <= to; q++) {
+      const a = scaleOf(ctx, q);
+      if (breakTest) {
+        // 越过之后：收盘回到原来那一侧（越过缓冲）的根数
+        const back = top ? cs[q].c < lv.price - 0.1 * a : cs[q].c > lv.price + 0.1 * a;
+        if (back) {
+          const r = breakTest.reclaim ?? { count: 0, firstTs: cs[q].ts, lastTs: cs[q].ts, now: false };
+          r.count++;
+          r.lastTs = cs[q].ts;
+          breakTest.reclaim = r;
+        }
+        continue;
+      }
+      if (beyondAt(q)) {
+        breakTest = {
+          kind: 'break', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(q),
+          ts: cs[q].ts, idx: q, ageBars: to - q, extreme: extremeAt(q), close: cs[q].c, confirmTs: null, confirmClose: null,
+          effortRatio: effort(q), falseFirstTs: falseTest?.ts ?? null, retests: [], reclaim: null,
+        };
+        pendingPierce = -1;
+        continue;
+      }
+      if (pendingPierce >= 0) {
+        if (insideAt(q)) {
+          if (!falseTest) {
+            falseTest = {
+              kind: 'false', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(pendingPierce),
+              ts: cs[pendingPierce].ts, idx: pendingPierce, ageBars: to - pendingPierce, extreme: extremeAt(pendingPierce),
+              close: cs[pendingPierce].c, confirmTs: cs[q].ts, confirmClose: cs[q].c, effortRatio: effort(pendingPierce),
+              falseFirstTs: null, retests: [], reclaim: null,
+            };
+          } else {
+            falseTest.retests.push({ ts: cs[pendingPierce].ts, extreme: extremeAt(pendingPierce) });
+          }
+          pendingPierce = -1;
+        } else if (q - pendingPierce >= RESOLVE_BARS) {
+          pendingPierce = -1; // 一直卡在价位附近：不算假也不算真
+        }
+        continue;
+      }
+      if (pierceAt(q) >= minDepthAtr * a) {
+        if (insideAt(q)) {
+          if (!falseTest) {
+            falseTest = {
+              kind: 'false', side: top ? 'above' : 'below', level: lv.price, levelTs: lv.ts, touches: touchesAt(q),
+              ts: cs[q].ts, idx: q, ageBars: to - q, extreme: extremeAt(q), close: cs[q].c, confirmTs: null, confirmClose: null,
+              effortRatio: effort(q), falseFirstTs: null, retests: [], reclaim: null,
+            };
+          } else {
+            falseTest.retests.push({ ts: cs[q].ts, extreme: extremeAt(q) });
+          }
+        } else {
+          pendingPierce = q;
+        }
+      }
+    }
+    const ev = breakTest ?? falseTest;
+    if (!ev || ev.idx < windowStart) continue;
+    if (breakTest?.reclaim) {
+      const last = cs[to];
+      const a = scaleOf(ctx, to);
+      breakTest.reclaim.now = top ? last.c < lv.price - 0.1 * a : last.c > lv.price + 0.1 * a;
+    }
+    out.push(ev);
+  }
+  // 同一根上被测试的几个价位都保留：挑哪个来说（亚盘价、碰过几次）由图层决定
+  return out.sort((a, b) => b.idx - a.idx || b.touches - a.touches);
+}
+
+/** 最近 maxAge 根内已确认的摆动高低点（给盘面说「哪几次碰到这一带」用） */
+export function recentSwings(ctx: Ctx, maxAge = 160): RecentSwing[] {
+  return confirmedLevels(ctx, maxAge).map(l => ({
+    side: l.side === 'top' ? 'above' as const : 'below' as const,
+    price: l.price, ts: l.ts, confirmedTs: l.confirmedTs, broken: l.breakIdx != null,
+  })).sort((a, b) => a.ts - b.ts);
+}
+
 /** Only fresh events drive bias; historical events remain visible but decay to zero. */
 export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
   const to = ctx.n - 1;
-  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, poolAbove: null, poolBelow: null, pendingAbove: null, pendingBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, bias: 0, strength: 0, headline: '没有已收盘行情。' };
+  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, poolAbove: null, poolBelow: null, pendingAbove: null, pendingBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, tests: [], swings: [], bias: 0, strength: 0, headline: '没有已收盘行情。' };
   const price = ctx.cs[to].c;
   const { tops, bottoms } = equalLevels(ctx);
   const pools = [...tops, ...bottoms];
@@ -336,5 +488,5 @@ export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
     : structure && to - structure.idx <= FRESH_EVENT_BARS
       ? `近期无新的扫位事件；${to - structure.idx} 根前出现简化 ${structure.kind} 收盘越位事件。`
       : '近期没有足够新的扫位/越位证据；历史关键位仅作参考，方向保持中性。';
-  return { pools, nearestAbove, nearestBelow, poolAbove, poolBelow, pendingAbove: pending.above, pendingBelow: pending.below, stopHunts: hunts, structure, structureTs, structureAgeBars, bias, strength, headline };
+  return { pools, nearestAbove, nearestBelow, poolAbove, poolBelow, pendingAbove: pending.above, pendingBelow: pending.below, stopHunts: hunts, structure, structureTs, structureAgeBars, tests: levelTests(ctx), swings: recentSwings(ctx), bias, strength, headline };
 }

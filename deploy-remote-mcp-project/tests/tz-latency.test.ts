@@ -82,11 +82,10 @@ const H = 3_600_000, DAY = 86_400_000, MS = 300_000, T0 = 1_800_000_000_000;
   const report = buildFrameworks(cs, MS, 'SOL-USDT-SWAP', '5m', null, T0 + 94 * MS + 1);
   assert.ok(report, 'report');
   const marks = projectFrameworkMarks(report, DEFAULT_FRAMEWORK_MARK_PREFS, MS).payload;
-  const line = marks.levels.find(l => l.id === 'fw:liq:pending-above');
-  assert.ok(line, `pending level painted: ${marks.levels.map(l => l.id).join(',')}`);
-  assert.equal(line!.style, 'dashed');
-  assert.equal(line!.name, '前高（待确认 3/5）');
-  assert.ok(line!.detail!.some(s => s.includes(fmtDateTime(cs[90].ts))), '悬停时间为北京时间');
+  // 待确认前高不再单独画虚线：它并进上方的压力带，悬停写明「还没确认」
+  const band = marks.levels.find(l => l.id === 'fw:band:pressure');
+  assert.ok(band, `pending high joins the pressure band: ${marks.levels.map(l => l.id).join(',')}`);
+  assert.ok(band!.detail![0].includes(`${fmtClock(cs[90].ts)} 的高点`) && band!.detail![0].includes('还没确认'), band!.detail![0]);
 
   // 再收两根仍不越过：正式确认，待确认线让位
   const more = [...cs, bar(94, 104.25), bar(95, 104)];
@@ -96,15 +95,15 @@ const H = 3_600_000, DAY = 86_400_000, MS = 300_000, T0 = 1_800_000_000_000;
   // 被越过：待确认直接消失
   const broken = [...cs, bar(94, 105.8)];
   assert.equal(pendingSwings(buildContext(broken)).above?.idx === 90, false);
-  pass('4 · 前高右侧 2–4 根就以「待确认」虚线提前出现，确认后换成正式前高，被越过即消失');
+  pass('4 · 前高右侧 2–4 根就提前算进压力带（写明还没确认），确认后换成正式前高，被越过即消失');
 
-  // 5. 分形事件带确认位置（极值右侧第 2 根），图层据此画确认尾巴
+  // 5. 分形不再画在 K 线上（各周期方向只在右上角显示）
   const waves = zig([[0, 100], [12, 103], [24, 101], [36, 104], [48, 102], [60, 105], [72, 103], [84, 106], [96, 104], [108, 107], [118, 106]]);
   const wr = buildFrameworks(waves, MS, 'SOL-USDT-SWAP', '5m', null, waves.at(-1)!.ts + MS + 1);
-  const frac = projectFrameworkMarks(wr, DEFAULT_FRAMEWORK_MARK_PREFS, MS).payload.events.filter(e => e.id.startsWith('fw:frac:'));
-  assert.ok(frac.length >= 2, `fractal events ${frac.length}`);
-  for (const e of frac) assert.equal(e.confirmTs, e.ts + 2 * MS, `${e.id} 确认那根 = 极值右侧第 2 根`);
-  pass(`5 · 分形标注携带确认那根的时间（${frac.length} 个），图上可见「标在极值、何时确认」`);
+  const wm = projectFrameworkMarks(wr, DEFAULT_FRAMEWORK_MARK_PREFS, MS);
+  assert.equal(wm.payload.events.filter(e => e.id.startsWith('fw:frac:')).length, 0);
+  assert.ok(wm.hud!.rows.length >= 2);
+  pass('5 · 分形不再画在 K 线上，各周期方向只在右上角显示');
 }
 
 // 6. 收盘即时重算 / 收盘看门狗（浏览器全局用最小桩）

@@ -242,8 +242,10 @@ const quoted = (cs: Candle[]) => cs.map(c => ({ ...c, confirm: 1 as const, volum
 
   const full = projectFrameworkMarks(report, DEFAULT_FRAMEWORK_MARK_PREFS, MS);
   assert.ok(full.payload.levels.some(l => l.id === 'fw:amt:poc'), 'AMT POC should be marked when quote volume is ready');
-  assert.ok(full.payload.levels.some(l => l.id === 'fw:amt:vah'));
-  assert.ok(full.payload.levels.some(l => l.id === 'fw:amt:val'));
+  // 密集区上下沿只作为压力带 / 支撑带的成员，不再单独画线；右侧最多 3 个标签（上下两条带 + 成交最多）
+  assert.ok(!full.payload.levels.some(l => l.id === 'fw:amt:vah' || l.id === 'fw:amt:val'));
+  assert.ok(full.payload.levels.filter(l => l.label).length <= 3);
+  assert.ok(full.payload.events.length <= 3, 'at most 3 candle markers');
   assert.ok(full.payload.zones.length <= MAX_FVG_ZONES, 'FVG zones are bounded to prevent clutter');
   assert.ok(full.hud !== null && full.hud.rows.length >= 2, 'MTF HUD shows ladder summary');
 
@@ -278,33 +280,22 @@ const quoted = (cs: Candle[]) => cs.map(c => ({ ...c, confirm: 1 as const, volum
   pass('mark projection: toggles, AMT quote-volume gate, bounded zones, unique per-bar events');
 }
 
-// 12. Same-candle StopHunt + Wyckoff Spring/Upthrust merges cleanly into one marker.
+// 12. 同一根上既有假跌破又有跌破：只画一个标记，真的优先
 {
   const base = quoted(annotationCandles(true, 120, NOW));
   const now = base.at(-1)!.ts + MS;
   const report = buildFrameworks(base, MS, 'BTC-USDT-SWAP', '5m', null, now)!;
-  const synthetic = {
-    ...report,
-    liquidity: {
-      ...report.liquidity,
-      stopHunts: [{
-        side: 'below' as const, level: 100, idx: 110, ts: base[110].ts, ageBars: 9,
-        depthAtr: 0.4, touches: 2, reclaimed: true, kind: 'sweep' as const, taker: null, reason: 'sweep test',
-      }],
-    },
-    wyckoff: {
-      ...report.wyckoff,
-      springs: [{
-        kind: 'spring' as const, idx: 110, ts: base[110].ts, ageBars: 9, level: 100,
-        depthAtr: 0.4, reclaimed: true, effortRatio: 1.5, taker: null, quality: 'strong' as const, reason: 'spring test',
-      }],
-    },
-  };
+  const t = (kind: 'false' | 'break', level: number) => ({
+    kind, side: 'below' as const, level, levelTs: base[90].ts, touches: 1, ts: base[110].ts, idx: 110, ageBars: 9,
+    extreme: 99.5, close: kind === 'false' ? 100.2 : 99.6, confirmTs: null, confirmClose: null, effortRatio: null,
+    falseFirstTs: null, retests: [], reclaim: null,
+  });
+  const synthetic = { ...report, liquidity: { ...report.liquidity, tests: [t('false', 100), t('break', 100.4)] } };
   const out = projectFrameworkMarks(synthetic, DEFAULT_FRAMEWORK_MARK_PREFS, MS);
   const atBar = out.payload.events.filter(e => e.ts === base[110].ts && e.side === 'below');
-  assert.equal(atBar.length, 1, 'same-bar sweep + spring must merge into one marker');
-  assert.equal(atBar[0].text, '扫低·弹簧');
-  pass('mark projection: same-bar sweep + spring merges into single label');
+  assert.equal(atBar.length, 1, 'same-bar false break + break must be one marker');
+  assert.equal(atBar[0].text, '跌破');
+  pass('mark projection: same-bar 假跌破 + 跌破 shows one marker (跌破)');
 }
 
 // 13. Mark preferences store: persistence, sanitization, reset.

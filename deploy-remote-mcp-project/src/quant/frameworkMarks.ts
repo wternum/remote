@@ -1,6 +1,17 @@
-// Pure projection from a causal FrameworkReport into clean, bounded chart markings.
-// Every label is concise and deduplicated per (bar timestamp, side) so markers
-// never stack on the same candle. No DOM or browser globals.
+// Pure projection from a causal FrameworkReport into a small, readable set of chart markings
+// (2026-11-10 用户确认的精简示例)。No DOM or browser globals.
+//
+// 图上只留：
+//  · 上方最近一条压力带、下方最近一条支撑带（浅色色带；两边都被试过时叫「箱顶 / 箱底」）
+//  · 成交最多价（一条线）
+//  · 不在带里的、离现价最近的缺口（只画还没补的那一截，上下各最多一个）
+//  · 最近 3 次「突破 / 跌破 / 假突破 / 假跌破」
+//  · 右上角盘面：各周期方向 + 一个结论
+// 前高前低、等高等低、密集区上下沿、亚盘高低点都只作为带的成员出现在悬停里，不再各自出标签。
+//
+// 悬停文案（标题 + 最多 2 行）：① 发生了什么 ② 接下来怎么看（条件 → 结论）。不写 ATR / 摆动 / 流动性
+// 等术语，不写「容易 / 常」这种回测不支持的说法；共用的说明只在四框架面板底部说一次。
+// 时间按北京时间：今天只写 13:50，昨天写「昨天 13:50」。
 import {
   decimalsFor,
   type AnnEvent,
@@ -10,15 +21,31 @@ import {
   type AnnZone,
 } from '@/vela/annotTypes';
 import type { FrameworkReport } from './frameworks';
-import { fmtDateTime } from '@/lib/displayTime';
-import type { HighRel, LowRel, Tfbias } from './fractal';
-import type { LiquidityPoolCluster } from './liquidity';
+import { fmtWhen } from '@/lib/displayTime';
+import type { Tfbias } from './fractal';
+import {
+  bandShort,
+  buildScene,
+  MAX_TEST_MARKS,
+  NEAR_UNITS,
+  readMarket,
+  refNamesAt,
+  sp,
+  type Band,
+  type BandItem,
+  type RefPoint,
+  type Touch,
+} from './marketRead';
 
 export interface FrameworkMarkPrefs {
   enabled: boolean;
+  /** 突破 / 跌破 / 假突破 / 假跌破，以及高低点参与合带 */
   liquidity: boolean;
+  /** 旧的分形标记开关：分形已不画在 K 线上，只用于右上角各周期方向（保留字段以兼容已存的设置） */
   fractals: boolean;
+  /** 缺口 */
   wyckoffFvg: boolean;
+  /** 成交最多价（以及密集区上下沿参与合带） */
   amt: boolean;
   labels: boolean;
 }
@@ -50,11 +77,14 @@ export interface FrameworkHudRow {
   bias: Tfbias;
   insufficient: boolean;
   arrow: '↑' | '↓' | '—';
+  /** 右上角显示的方向字：上涨 / 下跌 / 震荡 / —（K 线不够） */
+  word: string;
 }
 
 export interface FrameworkHud {
   rows: FrameworkHudRow[];
-  verdict: '偏多' | '偏空' | '中性';
+  /** 把各个标注配合起来读出来的结论（底栏「标注」按钮显示同一个） */
+  verdict: '偏多' | '偏空' | '观望';
   tone: AnnTone;
   phase: string;
   title: string;
@@ -66,13 +96,18 @@ export interface FrameworkMarkResult {
   hud: FrameworkHud | null;
 }
 
-export const MAX_STOP_HUNT_MARKS = 2;
-export const MAX_SPRING_MARKS = 2;
-export const MAX_FVG_ZONES = 3;
-const FRESH_STOP_HUNT_BARS = 48;
-const FRESH_SPRING_BARS = 48;
-const FRESH_STRUCTURE_BARS = 72;
+export interface FrameworkMarkExtras {
+  /** 外部的右侧标签（亚盘高低点，只有仍有效的价位），一起参与合带 */
+  extraLevels?: AnnLevel[];
+  /** 起名字用的参考价（含已被打掉的今天 / 昨天亚盘最高、最低价） */
+  refs?: RefPoint[];
+}
+
+/** 缺口：上下各最多一个 */
+export const MAX_FVG_ZONES = 2;
 const MAX_POOL_DISTANCE_ATR = 8;
+/** 色带最早从这么多根之前画起 */
+const BAND_LOOKBACK_BARS = 48;
 
 const PHASE_TEXT: Record<string, string> = {
   accumulation: '吸筹候选',
@@ -83,26 +118,7 @@ const PHASE_TEXT: Record<string, string> = {
   unknown: '未知',
 };
 
-const REL_DESC: Record<HighRel | LowRel, string> = {
-  HH: '更高高点 (HH)',
-  LH: '更低高点 (LH)',
-  EQH: '等高点 (EQH)',
-  HL: '更高低点 (HL)',
-  LL: '更低低点 (LL)',
-  EQL: '等低点 (EQL)',
-};
-
-/** 每种分形关系对短线的一句话含义 */
-const REL_MEANING: Record<HighRel | LowRel, string> = {
-  HH: '高点还在抬高，多头仍在往上推。',
-  LH: '高点在降低，往上攻的力气变弱。',
-  EQH: '两次冲到差不多的价位都没过去，上方有压力。',
-  HL: '低点在抬高，回调时有人接。',
-  LL: '低点还在降低，空头仍在往下压。',
-  EQL: '两次跌到差不多的价位都没破，下方有支撑。',
-};
-
-const BIAS_TEXT: Record<Tfbias, string> = { bull: '上涨', bear: '下跌', range: '震荡', unknown: '数据不足' };
+const BIAS_WORD: Record<Tfbias, string> = { bull: '上涨', bear: '下跌', range: '震荡', unknown: '方向不明' };
 
 const emptyPayload = (decimals = 2): AnnPayload => ({
   levels: [],
@@ -115,9 +131,7 @@ const emptyPayload = (decimals = 2): AnnPayload => ({
   rev: 0,
 });
 
-/** 图表时区为北京时间：悬停里统一写 "11-10 06:50"（与时间轴一致，不再附加时区后缀） */
-const fmtTime = fmtDateTime;
-/** 窗口时长：5m→"10 小时"，4H→"20 天"，1D→"120 天"（不再出现"2880 小时"） */
+/** 窗口时长：5m→"10 小时"，4H→"20 天"，1D→"120 天" */
 const hoursText = (bars: number, barMs: number) => {
   const h = (bars * barMs) / 3_600_000;
   const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
@@ -125,355 +139,322 @@ const hoursText = (bars: number, barMs: number) => {
   return h >= 1 ? `${num(h)} 小时` : `${Math.round(h * 60)} 分钟`;
 };
 
-type Pool = LiquidityPoolCluster;
+const COUNT = ['', '一', '两', '三', '四', '五', '六'];
+const countWord = (n: number) => COUNT[n] ?? String(n);
+
+/** 还没补的那一截缺口 */
+interface OpenGap {
+  kind: 'bullish' | 'bearish';
+  lo: number;
+  hi: number;
+  fromTs: number;
+  /** 回来补到的最远价和那根的时间（没回来碰过为 null） */
+  touchTs: number | null;
+  touchPrice: number | null;
+}
+
+/** 按形成之后的已收盘 K 线把缺口裁成「还没补的那一截」；价格上重叠的同向缺口并成一个 */
+function openGaps(report: FrameworkReport): OpenGap[] {
+  const out: OpenGap[] = [];
+  for (const z of report.wyckoff.imbalances) {
+    if (!(z.hi > z.lo) || !Number.isFinite(z.fromTs)) continue;
+    const bull = z.kind === 'bullish';
+    let lo = z.lo, hi = z.hi, touchTs: number | null = null, touchPrice: number | null = null;
+    for (const b of report.recent) {
+      if (b.ts <= z.toTs) continue;
+      if (bull ? b.l < hi : b.h > lo) {
+        if (bull ? b.l < (touchPrice ?? hi) : b.h > (touchPrice ?? lo)) {
+          touchPrice = bull ? b.l : b.h;
+          touchTs = b.ts;
+        }
+      }
+    }
+    if (touchPrice != null) {
+      if (bull) hi = Math.min(hi, touchPrice);
+      else lo = Math.max(lo, touchPrice);
+    }
+    if (!(hi > lo)) continue;
+    out.push({ kind: z.kind, lo, hi, fromTs: z.fromTs, touchTs, touchPrice });
+  }
+  const merged: OpenGap[] = [];
+  for (const g of out.sort((a, b) => a.lo - b.lo)) {
+    const last = merged.at(-1);
+    if (last && last.kind === g.kind && g.lo <= last.hi) {
+      last.hi = Math.max(last.hi, g.hi);
+      last.fromTs = Math.max(last.fromTs, g.fromTs);
+      if (g.touchTs != null && (last.touchTs == null || g.touchTs > last.touchTs)) {
+        last.touchTs = g.touchTs;
+        last.touchPrice = g.touchPrice;
+      }
+    } else merged.push({ ...g });
+  }
+  return merged;
+}
 
 export function projectFrameworkMarks(
   report: FrameworkReport | null,
   prefs: FrameworkMarkPrefs,
   barMs: number,
+  extras: FrameworkMarkExtras = {},
 ): FrameworkMarkResult {
+  const extraLevels = extras.extraLevels ?? [];
   if (!report || !prefs.enabled) {
-    return { payload: emptyPayload(report ? decimalsFor(report.lastPrice) : 2), hud: null };
+    const payload = emptyPayload(report ? decimalsFor(report.lastPrice) : 2);
+    payload.levels.push(...extraLevels);
+    return { payload, hud: null };
   }
 
   const decimals = decimalsFor(report.lastPrice);
   const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(decimals) : '—');
+  // 价位、带的边：五位数价格（BTC）取整，其余照常
+  const fmtR = (v: number) => (Number.isFinite(v) ? v.toFixed(Math.abs(report.lastPrice) >= 10_000 ? 0 : decimals) : '—');
+  // 参考时刻 = 最近一根已收盘 K 线的收盘时间：同一天只写 "13:50"
+  const when = (ts: number | null | undefined) => fmtWhen(ts, report.lastTs + barMs);
+  const unit = report.atr > 0 ? report.atr : Math.abs(report.lastPrice) * 0.002;
+  const price = report.lastPrice;
+  const refs = extras.refs ?? [];
+  const L = report.liquidity;
+
+  // 1. 参与合带的成员
+  const items: BandItem[] = [];
+  if (prefs.liquidity) {
+    for (const p of L.pools) {
+      if (!p.active || !Number.isFinite(p.price) || p.distanceAtr > MAX_POOL_DISTANCE_ATR) continue;
+      const up = p.side === 'above';
+      items.push({
+        key: `pool:${p.side}:${p.price}`, lo: p.price, hi: p.price, ts: p.lastTs,
+        desc: p.equal ? `${countWord(p.touches)}次没${up ? '过去的高点' : '破的低点'} ${fmtR(p.price)}` : `${when(p.firstTs)} 的${up ? '高点' : '低点'} ${fmtR(p.price)}`,
+        short: p.equal ? `${up ? '等高' : '等低'}×${p.touches} ${fmtR(p.price)}` : `${up ? '前高' : '前低'} ${fmtR(p.price)}`,
+      });
+    }
+    for (const pd of [L.pendingAbove, L.pendingBelow]) {
+      if (!pd || !Number.isFinite(pd.price) || pd.distanceAtr > MAX_POOL_DISTANCE_ATR) continue;
+      if (items.some(i => Math.abs(i.lo - pd.price) <= Math.abs(pd.price) * 0.0002)) continue;
+      const up = pd.side === 'above';
+      items.push({
+        key: `pending:${pd.side}`, lo: pd.price, hi: pd.price, ts: pd.ts,
+        desc: `${when(pd.ts)} 的${up ? '高点' : '低点'} ${fmtR(pd.price)}（还没确认）`,
+        short: `${up ? '高点' : '低点'} ${fmtR(pd.price)}（未确认）`,
+      });
+    }
+    // 刺穿后收回的那根冲到 / 跌到的价：这一带真正被试过的边
+    for (const t of L.tests) {
+      if (t.kind !== 'false' || report.lastTs - t.ts > BAND_LOOKBACK_BARS * barMs) continue;
+      const up = t.side === 'above';
+      if (items.some(i => i.lo === t.extreme)) continue;
+      items.push({
+        key: `test:${t.ts}:${t.side}`, lo: t.extreme, hi: t.extreme, ts: t.ts,
+        desc: `${when(t.ts)} ${up ? '冲到' : '跌到'}的 ${fmt(t.extreme)}`,
+        short: `${when(t.ts)} ${up ? '冲到' : '跌到'}的 ${fmt(t.extreme)}`,
+      });
+    }
+  }
+  const prof = report.auction.profile;
+  const amtReady = prefs.amt && report.quality.auctionVolumeReady && prof.poc != null && prof.vah != null && prof.val != null;
+  if (amtReady) {
+    items.push({ key: 'amt:vah', lo: prof.vah!, hi: prof.vah!, desc: `密集区上沿 ${fmtR(prof.vah!)}`, short: `密集区上沿 ${fmtR(prof.vah!)}` });
+    items.push({ key: 'amt:val', lo: prof.val!, hi: prof.val!, desc: `密集区下沿 ${fmtR(prof.val!)}`, short: `密集区下沿 ${fmtR(prof.val!)}` });
+  }
+  const gaps = prefs.wyckoffFvg ? openGaps(report) : [];
+  for (const g of gaps) {
+    items.push({
+      key: `gap:${g.fromTs}:${g.kind}`, lo: g.lo, hi: g.hi, ts: g.fromTs,
+      desc: `${when(g.fromTs)} 留下${g.touchTs != null ? '还没补的' : '的'}缺口 ${fmtR(g.lo)}–${fmtR(g.hi)}`,
+      short: `缺口 ${fmtR(g.lo)}–${fmtR(g.hi)}`,
+    });
+  }
+  for (const l of extraLevels) {
+    const day = l.name.startsWith('今日') ? '今天' : l.name.startsWith('昨日') ? '昨天' : l.name.replace(/亚盘[高低]$/, '');
+    const word = `${day}亚盘最${l.name.endsWith('高') ? '高' : '低'}价 ${fmtR(l.price)}`;
+    items.push({ key: l.id, lo: l.price, hi: l.price, ts: l.fromTs, desc: word, short: word });
+  }
+
+  // 2. 上下最近的带、箱体
+  const scene = buildScene(report, items, unit, barMs, refs);
+  const { P, S, box } = scene;
   const levels: AnnLevel[] = [];
   const zones: AnnZone[] = [];
-  const eventMap = new Map<string, AnnEvent>();
-
-  const putEvent = (ev: AnnEvent, extraDetail?: string[]) => {
-    const key = `${ev.ts}:${ev.side}`;
-    const prev = eventMap.get(key);
-    if (!prev) {
-      eventMap.set(key, ev);
-      return;
-    }
-    if (ev.priority > prev.priority) {
-      eventMap.set(key, {
-        ...ev,
-        detail: [...(ev.detail ?? []), ...(extraDetail ?? prev.detail ?? [])],
-      });
-    } else {
-      prev.detail = [...(prev.detail ?? []), ...(extraDetail ?? ev.detail ?? [])];
-    }
+  const bandStart = (b: Band) => {
+    const ts = b.items.map(i => i.ts).filter((t): t is number => Number.isFinite(t));
+    const floor = report.lastTs - BAND_LOOKBACK_BARS * barMs;
+    return ts.length ? Math.max(floor, Math.min(...ts)) : report.lastTs - 12 * barMs;
   };
+  const touchText = (list: readonly Touch[], up: boolean) =>
+    `${list.map(t => `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.price)}`).join('、')}，${countWord(list.length)}次都收了回来。`;
+  const bandLevel = (b: Band, pressure: boolean): AnnLevel => {
+    const touches = pressure ? scene.touchP : scene.touchS;
+    const next = pressure ? scene.nextUp : scene.nextDown;
+    const name = box ? (pressure ? '箱顶' : '箱底') : pressure ? '压力带' : '支撑带';
+    const edge = b.inside ? (price - b.lo <= b.hi - price ? b.lo : b.hi) : pressure ? b.lo : b.hi;
+    const first = touches.length >= 2
+      ? touchText(touches, pressure)
+      : b.items.length >= 2
+        ? `这里叠着${countWord(b.items.length)}样：${b.items.map(i => i.desc).join('、')}。`
+        : `${b.items[0].desc}。`;
+    const nextText = next ? `，${pressure ? '上面' : '下面'}先看${sp(bandShort(next, fmtR))}` : '';
+    const second = pressure
+      ? `再到这里压不上去，我才考虑空；收盘站上 ${fmtR(b.hi)} → ${box ? '箱子向上破' : '这条压力带作废'}${nextText}。`
+      : `回到这里守得住，我才考虑多；收盘跌破 ${fmtR(b.lo)} → ${box ? '箱子向下破' : '这条支撑带作废'}${nextText}。`;
+    return {
+      id: `fw:band:${pressure ? 'pressure' : 'support'}`,
+      price: edge,
+      ...(b.hi > b.lo ? { range: [b.lo, b.hi] as [number, number] } : {}),
+      fromTs: bandStart(b),
+      toTs: null,
+      tone: pressure ? 'top' : 'bottom',
+      name,
+      style: 'dashed',
+      rank: 'read',
+      priority: 90,
+      label: prefs.labels,
+      detail: [first, second],
+    };
+  };
+  if (P) levels.push(bandLevel(P, true));
+  if (S) levels.push(bandLevel(S, false));
 
-  // 1. AMT reference levels (strictly requires exchange quote turnover).
-  const prof = report.auction.profile;
-  if (prefs.amt && report.quality.auctionVolumeReady && prof.poc != null && prof.vah != null && prof.val != null) {
-    // Anchor rolling levels at report.lastTs (where the rolling window completed),
-    // not retrospectively back at window.fromTs.
-    const fromTs = report.lastTs;
-    const mig = report.auction.migration;
-    const span = `最近 ${hoursText(prof.window.bars, barMs)}（${prof.window.bars} 根，${fmtTime(prof.window.fromTs)} 至 ${fmtTime(prof.window.toTs)}）`;
-    const estimate = '按每根 K 线的成交额在高低点之间平均分摊估算，不是逐笔成交分布；窗口随新 K 线滚动。';
-    const drift = mig && mig.earlyPoc != null && mig.latePoc != null
-      ? mig.dir === 0
-        ? `成交重心基本没动（前半段 ${fmt(mig.earlyPoc)} → 后半段 ${fmt(mig.latePoc)}）。`
-        : `成交重心在${mig.dir > 0 ? '上移' : '下移'}：前半段 ${fmt(mig.earlyPoc)} → 后半段 ${fmt(mig.latePoc)}。`
-      : null;
+  // 3. 成交最多价
+  if (amtReady) {
+    const poc = prof.poc!;
     levels.push({
       id: 'fw:amt:poc',
-      price: prof.poc,
-      fromTs,
+      // 滚动窗口在最新一根收盘时才算完：线从这里画起，不往回画
+      price: poc,
+      fromTs: report.lastTs,
       toTs: null,
       tone: 'neck',
-      name: 'POC 成交最密',
+      name: '成交最多',
       style: 'solid',
       rank: 'read',
       priority: 86,
-      label: prefs.labels,
+      label: prefs.labels && Math.abs(poc - price) <= MAX_POOL_DISTANCE_ATR * unit,
       detail: [
-        `${span}成交最集中的价格。`,
-        '多空都认可的"公允价"，价格常围着它来回拉扯；离得远了容易被拉回来。',
-        ...(drift ? [drift] : []),
-        `现价距它 ${prof.pocDistanceAtr.toFixed(1)} ATR。`,
-        estimate,
-      ],
-    });
-    const area = `${span}约 70% 的成交落在 ${fmt(prof.val)}–${fmt(prof.vah)} 之间（价值区）`;
-    levels.push({
-      id: 'fw:amt:vah',
-      price: prof.vah,
-      fromTs,
-      toTs: null,
-      tone: 'top',
-      name: 'VAH 价值上沿',
-      style: 'dotted',
-      rank: 'normal',
-      priority: 66,
-      label: prefs.labels,
-      detail: [
-        `${area}，这是上沿。`,
-        `收盘站上并守住：可能向上找新价位；冲上去又收回：常回落到 POC ${fmt(prof.poc)}。`,
-        estimate,
-      ],
-    });
-    levels.push({
-      id: 'fw:amt:val',
-      price: prof.val,
-      fromTs,
-      toTs: null,
-      tone: 'bottom',
-      name: 'VAL 价值下沿',
-      style: 'dotted',
-      rank: 'normal',
-      priority: 66,
-      label: prefs.labels,
-      detail: [
-        `${area}，这是下沿。`,
-        `收盘跌破并收不回：可能向下找新价位；跌下去又收回：常回升到 POC ${fmt(prof.poc)}。`,
-        estimate,
+        `最近 ${hoursText(prof.window.bars, barMs)}成交最多的价格，现在价格在它${price < poc ? '下面' : price > poc ? '上面' : '上'}。`,
+        '（按 K 线成交额估算）',
       ],
     });
   }
 
-  // 2. Liquidity: nearest reference + nearest equal-level pool, fresh stop-hunts, latest BOS/CHoCH.
+  // 4. 缺口：不在两条带里的，上下各取离现价最近的一个
+  const fvgEnd = report.lastTs + Math.max(60_000, barMs) * 2;
+  const inPicked = (g: OpenGap) => [P, S].some(b => b && b.items.some(i => i.key === `gap:${g.fromTs}:${g.kind}`));
+  const near = (g: OpenGap) => (g.lo > price ? g.lo - price : g.hi < price ? price - g.hi : 0) <= NEAR_UNITS * unit;
+  const pickGap = (list: OpenGap[]) => list.filter(g => !inPicked(g) && near(g))[0];
+  const shown = [
+    pickGap(gaps.filter(g => g.hi > price).sort((a, b) => a.lo - b.lo)),
+    pickGap(gaps.filter(g => g.lo < price && !(g.hi > price)).sort((a, b) => b.hi - a.hi)),
+  ].filter((g): g is OpenGap => !!g);
+  for (const g of shown) {
+    const bull = g.kind === 'bullish';
+    zones.push({
+      id: `fw:fvg:${g.fromTs}:${g.kind}`,
+      fromTs: g.fromTs,
+      toTs: fvgEnd,
+      lo: g.lo,
+      hi: g.hi,
+      tone: bull ? 'long' : 'short',
+      text: prefs.labels ? '缺口' : '',
+      priority: 55,
+      title: `缺口 ${fmtR(g.lo)}–${fmtR(g.hi)}${g.touchTs != null ? '（还没补的部分）' : ''}`,
+      detail: [
+        `${when(g.fromTs)} 一口气${bull ? '涨上去' : '跌下来'}留下的${g.touchTs != null ? `，${when(g.touchTs)} 补到了 ${fmt(g.touchPrice!)}` : '，还没回来碰过'}。`,
+        `${bull ? `跌到 ${fmtR(g.lo)}` : `涨到 ${fmtR(g.hi)}`} 就补满了。`,
+      ],
+    });
+  }
+
+  // 5. 突破 / 跌破 / 假突破 / 假跌破：最近 3 次，同一根同一侧只留一个（真的优先）
+  const events: AnnEvent[] = [];
   if (prefs.liquidity) {
-    const { nearestAbove, nearestBelow, poolAbove, poolBelow, pendingAbove, pendingBelow, stopHunts, structure, structureTs, structureAgeBars } = report.liquidity;
-    const poolLevel = (p: Pool, id: string): AnnLevel => {
-      const up = p.side === 'above';
-      const word = up ? '高点' : '低点';
-      return {
-        id,
-        price: p.price,
-        fromTs: p.confirmedTs,
-        toTs: null,
-        tone: up ? 'top' : 'bottom',
-        name: p.equal ? `${up ? 'EQH 等高' : 'EQL 等低'}×${p.touches}` : up ? '前高' : '前低',
-        style: p.equal ? 'dashed' : 'dotted',
-        rank: 'read',
-        priority: p.equal ? 80 : 62,
-        label: prefs.labels,
-        detail: [
-          p.equal
-            ? `${p.touches} 个几乎一样${up ? '高' : '低'}的${word}（${fmtTime(p.firstTs)} 到 ${fmtTime(p.lastTs)}），${up ? '上方' : '下方'}最容易堆积止损和突破单。`
-            : `${up ? '上方' : '下方'}最近一个还没被${up ? '突破' : '跌破'}的${word}（${fmtTime(p.firstTs)} 那根）。`,
-          up
-            ? '刺破后收回 = 假突破（扫高），偏空看；收盘站上并守住 = 真突破。'
-            : '刺破后收回 = 假跌破（扫低），偏多看；收盘跌破并收不回 = 真跌破。',
-          `距现价 ${p.distanceAtr.toFixed(1)} ATR · ${fmtTime(p.confirmedTs + barMs)} 才确认（右侧 5 根收盘后）${p.active ? '' : ' · 此前被收盘击穿过，参考性变弱'}。`,
-          '止损单位置是常见经验推测，公共行情看不到真实挂单。',
-        ],
-      };
-    };
-    const within = (p: Pool | null): p is Pool => !!p && Number.isFinite(p.price) && p.distanceAtr <= MAX_POOL_DISTANCE_ATR;
-    if (within(nearestAbove)) levels.push(poolLevel(nearestAbove, 'fw:liq:above'));
-    if (within(nearestBelow)) levels.push(poolLevel(nearestBelow, 'fw:liq:below'));
-    // 更近的单个前高/前低会挡住真正的等高/等低池（例如 SOL 86.21 前低挡住 86.10 双底）：两者都画。
-    if (within(poolAbove) && poolAbove.price !== nearestAbove?.price) levels.push(poolLevel(poolAbove, 'fw:liq:pool-above'));
-    if (within(poolBelow) && poolBelow.price !== nearestBelow?.price) levels.push(poolLevel(poolBelow, 'fw:liq:pool-below'));
-
-    // 待确认前高/前低：右侧才收盘 2–4 根，提前给出参考线（虚线、低优先级），确认后自动换成正式前高/前低。
-    for (const pd of [pendingAbove, pendingBelow]) {
-      if (!pd || !Number.isFinite(pd.price) || pd.distanceAtr > MAX_POOL_DISTANCE_ATR) continue;
-      const up = pd.side === 'above';
-      if (levels.some(l => Math.abs(l.price - pd.price) <= Math.abs(pd.price) * 0.0002)) continue;
-      levels.push({
-        id: `fw:liq:pending-${pd.side}`,
-        price: pd.price,
-        fromTs: pd.ts,
-        toTs: null,
-        tone: up ? 'top' : 'bottom',
-        name: `${up ? '前高' : '前低'}（待确认 ${pd.rightBars}/${pd.needBars}）`,
-        style: 'dashed',
-        rank: 'normal',
-        priority: 48,
-        label: prefs.labels,
-        detail: [
-          `${fmtTime(pd.ts)} 那根的${up ? '高点' : '低点'} ${fmt(pd.price)}：左边 8 根都比它${up ? '低' : '高'}，右边已收盘 ${pd.rightBars} 根也没越过。`,
-          `再收 ${pd.needBars - pd.rightBars} 根不越过就正式成为${up ? '前高' : '前低'}（预计 ${fmtTime(pd.confirmTs + barMs)} 收盘后）；中途被越过这条线会直接消失。`,
-          '提前显示只为让你早点看见，未确认前不参与扫位 / 突破判断。',
-        ],
-      });
-    }
-
-    for (const h of stopHunts.filter(x => x.ageBars <= FRESH_STOP_HUNT_BARS).slice(0, MAX_STOP_HUNT_MARKS)) {
-      const above = h.side === 'above';
-      const sweep = h.kind === 'sweep';
-      const label = sweep ? (above ? '扫高收回' : '扫低收回') : (above ? '收破前高↑' : '收破前低↓');
-      const tone: AnnTone = sweep ? (above ? 'warn' : 'long') : (above ? 'long' : 'short');
-      const what = sweep
-        ? `价格刺破${above ? '上方' : '下方'} ${h.touches} 个前${above ? '高' : '低'}（${fmt(h.level)}）${h.depthAtr.toFixed(2)} ATR 后又收了回来 → 假${above ? '突破' : '跌破'}，偏${above ? '空' : '多'}看。`
-        : `收盘${above ? '站上' : '跌破'}了${above ? '上方' : '下方'} ${h.touches} 个前${above ? '高' : '低'}（${fmt(h.level)}）→ ${above ? '突破' : '跌破'}成立；回踩不破可偏${above ? '多' : '空'}看，收回去则变成假${above ? '突破' : '跌破'}。`;
-      putEvent({
-        id: `fw:hunt:${h.ts}:${h.side}`,
-        ts: h.ts,
-        side: h.side,
-        tone,
-        text: prefs.labels ? label : '',
-        priority: sweep ? 92 : 76,
-        marker: sweep ? 'tri' : 'diamond',
-        title: `${label} · ${fmt(h.level)}`,
-        detail: [
-          what,
-          `${h.ageBars} 根前（${fmtTime(h.ts)}）${h.taker != null ? ` · 这根主动买卖差 ${h.taker >= 0 ? '+' : ''}${(h.taker * 100).toFixed(0)}%` : ''}`,
-          '只是价格行为，看不到真实止损单或机构身份。',
-        ],
-      });
-    }
-
-    if (structure && structureTs != null && structureAgeBars != null && structureAgeBars <= FRESH_STRUCTURE_BARS) {
-      const up = structure.dir > 0;
-      const choch = structure.kind === 'CHOCH';
-      const short = `${choch ? 'CHoCH' : 'BOS'}${up ? '↑' : '↓'}`;
-      putEvent({
-        id: `fw:struct:${structureTs}:${structure.kind}`,
-        ts: structureTs,
-        side: up ? 'above' : 'below',
-        tone: up ? 'long' : 'short',
-        text: prefs.labels ? short : '',
-        priority: 78,
-        marker: 'diamond',
-        title: `${short} · ${up ? '收破前高' : '收破前低'} ${fmt(structure.price)}`,
-        detail: [
-          choch
-            ? `之前在走${up ? '低' : '高'}，这根${up ? '向上收破前高' : '向下收破前低'} ${fmt(structure.price)} → 可能由${up ? '空转多' : '多转空'}（CHoCH），等回踩确认。`
-            : `${up ? '向上收破前高' : '向下收破前低'} ${fmt(structure.price)} → ${up ? '上涨' : '下跌'}结构延续（BOS）。`,
-          `${structureAgeBars} 根前（${fmtTime(structureTs)}）· 只看收盘价，没有成交量确认${structureAgeBars > FRESH_STOP_HUNT_BARS ? ' · 已较久，参考性变弱' : ''}。`,
-        ],
-      });
-    }
-  }
-
-  // 3. Wyckoff springs/upthrusts (merged cleanly if on same bar as a sweep) + open FVGs.
-  if (prefs.wyckoffFvg) {
-    for (const s of report.wyckoff.springs.filter(x => x.ageBars <= FRESH_SPRING_BARS).slice(0, MAX_SPRING_MARKS)) {
-      const above = s.kind === 'upthrust';
-      const side: 'above' | 'below' = above ? 'above' : 'below';
-      const key = `${s.ts}:${side}`;
-      const existing = eventMap.get(key);
-      const quality = s.quality === 'strong' ? '强' : s.quality === 'moderate' ? '中' : '弱';
-      const springText = above
-        ? `震荡区间上沿 ${fmt(s.level)} 被刺破 ${s.depthAtr.toFixed(2)} ATR 后收回 → 假突破（Wyckoff 上冲回落），偏空看。`
-        : `震荡区间下沿 ${fmt(s.level)} 被刺破 ${s.depthAtr.toFixed(2)} ATR 后收回 → 假跌破（Wyckoff 弹簧），偏多看。`;
-      const springMeta = `${s.effortRatio != null ? `成交额是平时的 ${s.effortRatio.toFixed(1)} 倍 · ` : ''}强度${quality} · ${s.ageBars} 根前；之后回踩不破${above ? '上沿' : '下沿'}才算确认。`;
-      if (existing && existing.id.startsWith('fw:hunt:')) {
-        const mergedLabel = above ? '扫高·上冲' : '扫低·弹簧';
-        eventMap.set(key, {
-          ...existing,
-          id: `fw:merged:${s.ts}:${side}`,
-          tone: above ? 'warn' : 'long',
-          text: prefs.labels ? mergedLabel : '',
-          priority: 95,
-          title: `${mergedLabel} · ${fmt(s.level)}`,
-          detail: [...(existing.detail ?? []), springMeta],
-        });
+    const picked = scene.tests.slice(0, MAX_TEST_MARKS);
+    const inBox = (v: number) => !!box && v > box.lo && v < box.hi;
+    for (const t of picked) {
+      const up = t.side === 'above';
+      const lv = fmtR(t.level);
+      const names = refNamesAt(refs, t.level, unit);
+      const what = names.length
+        ? `${names.join('、')}${t.touches >= 2 ? `，前面也 ${t.touches} 次没${up ? '过去' : '破'}` : ''}`
+        : t.touches >= 2 ? `前面 ${t.touches} 次没${up ? '过去的高点' : '破的低点'}` : `${when(t.levelTs)} 的${up ? '高点' : '低点'}`;
+      const vol = t.effortRatio != null && t.effortRatio >= 1.5 ? `，放量 ${t.effortRatio.toFixed(1)} 倍` : '';
+      let text: string, tone: AnnTone, lines: string[];
+      if (t.kind === 'false') {
+        text = up ? '假突破' : '假跌破';
+        tone = up ? 'short' : 'long';
+        const first = t.confirmTs != null
+          ? `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘只${up ? '高' : '低'} ${fmt(Math.abs(t.close - t.level))}，没站稳；${when(t.confirmTs)} 收回到 ${fmt(t.confirmClose!)}${vol}。`
+          : `${when(t.ts)} ${up ? '冲到' : '跌到'} ${fmt(t.extreme)}，收盘 ${fmt(t.close)} 又回到${up ? '下面' : '上面'}${vol}。`;
+        const r = t.retests.at(-1);
+        const role = box ? (up ? '箱顶' : '箱底') : up ? '压力' : '支撑';
+        const second = r
+          ? `${when(r.ts)} 再${up ? '冲到' : '跌到'} ${fmt(r.extreme)} 也收了回来 → 这一带是${role}。`
+          : `之后收盘${up ? '站上' : '跌破'} ${fmtR(t.extreme)} → 这次不算。`;
+        lines = [first, second];
       } else {
-        const label = above ? '上冲' : '弹簧';
-        putEvent({
-          id: `fw:wy:${s.ts}:${s.kind}`,
-          ts: s.ts,
-          side,
-          tone: above ? 'warn' : 'long',
-          text: prefs.labels ? label : '',
-          priority: 82,
-          marker: 'diamond',
-          title: `${label}（Wyckoff）· ${fmt(s.level)}`,
-          detail: [springText, springMeta],
-        });
+        const failed = !!t.reclaim?.now;
+        text = failed ? (up ? '突破又跌回' : '跌破又收回') : up ? '突破' : '跌破';
+        tone = failed ? 'neck' : up ? 'long' : 'short';
+        const multi = names.length + (t.touches >= 2 ? 1 : 0) >= 2;
+        // 「先假后真」只说紧挨着的（6 根以内）；隔得久的只提一句那次收回来过
+        const ff = t.falseFirstTs;
+        const close = ff != null && t.ts - ff <= 6 * barMs;
+        const first = close
+          ? `${when(ff)} 先${up ? '冲上去' : '刺下去'}又收回，${when(t.ts)} 收盘${up ? '站上' : '跌穿'} —— 先假后真，${up ? '多头' : '空头'}占上风。`
+          : `${when(t.ts)} 收盘${up ? '站上' : '跌穿'}${multi ? `，几层${up ? '压力一起被突破' : '支撑一起被打掉'}` : ''}${vol}${ff != null ? `；${when(ff)} 那次${up ? '冲上去' : '跌下去'}还收回来过` : ''}。`;
+        const rc = t.reclaim;
+        const span = rc ? (rc.count === 1 ? when(rc.firstTs) : `${when(rc.firstTs)}–${when(rc.lastTs)}`) : '';
+        // 现价已经离这条线超过 1 个波动单位（顺着突破 / 跌破的方向）：回抽没站住，仍然有效
+        const away = up ? price - t.level > unit : t.level - price > unit;
+        const second = !rc
+          ? `${up ? '回落跌不回' : '反弹收不回'} ${lv} ${up ? '下面' : '上面'}，${up ? '突破' : '跌破'}就还有效。`
+          : rc.now
+            ? `${when(rc.firstTs)} 起收回 ${lv} ${up ? '下面' : '上面'} → 这次${up ? '突破' : '跌破'}失败了。`
+            : inBox(t.level)
+              ? `${span} 又收回${up ? '下面' : '上面'} ${rc.count} 根，然后又${up ? '站了上去' : '掉了下来'}；这条线现在夹在箱子中间，分量变轻。`
+              : away
+                ? `${span} ${up ? '回落到下面' : '反抽回上面'} ${rc.count} 根没站住，${up ? '突破' : '跌破'}还有效。`
+                : `${span} 又收回${up ? '下面' : '上面'} ${rc.count} 根，然后又${up ? '站了上去' : '掉了下来'}；这条线被来回穿，分量变轻。`;
+        lines = [first, second];
       }
-    }
-
-    const nearestFvgs = [...report.wyckoff.imbalances]
-      .filter(z => z.hi > z.lo && Number.isFinite(z.fromTs))
-      .sort((a, b) => {
-        const da = Math.abs((a.lo + a.hi) / 2 - report.lastPrice);
-        const db = Math.abs((b.lo + b.hi) / 2 - report.lastPrice);
-        return da - db || b.to - a.to;
-      })
-      .slice(0, MAX_FVG_ZONES);
-
-    const fvgEnd = report.lastTs + Math.max(60_000, barMs) * 2;
-    for (const z of nearestFvgs) {
-      const bull = z.kind === 'bullish';
-      zones.push({
-        id: `fw:fvg:${z.fromTs}:${z.kind}`,
-        fromTs: z.fromTs,
-        toTs: fvgEnd,
-        lo: z.lo,
-        hi: z.hi,
-        tone: bull ? 'long' : 'short',
-        text: prefs.labels ? (bull ? 'FVG↑' : 'FVG↓') : '',
-        priority: 55,
-        title: `${bull ? '多头缺口 FVG↑' : '空头缺口 FVG↓'} · ${fmt(z.lo)}–${fmt(z.hi)}`,
-        detail: [
-          `${bull ? '快速上涨' : '快速下跌'}留下的价格空白（${fmtTime(z.fromTs)} 起），这段价格几乎没有来回成交。`,
-          `价格回到这里常有反应：${bull ? '多头缺口偏支撑' : '空头缺口偏压力'}；被完全填满就失效。`,
-          z.touched ? '已经回踩了一部分，还没填满。' : '还没被回踩过。',
-        ],
+      events.push({
+        id: `fw:test:${t.ts}:${t.side}:${t.kind}`,
+        ts: t.ts,
+        side: t.side,
+        tone,
+        text: prefs.labels ? text : '',
+        priority: t.kind === 'break' ? 80 : 78,
+        marker: t.kind === 'break' ? 'diamond' : 'tri',
+        title: `${text} · ${lv}（${what}）`,
+        detail: lines,
+        // 刺穿那根没收回、后面才收回：小尾巴指到收回那根
+        ...(t.confirmTs != null && t.confirmTs > t.ts ? { confirmTs: t.confirmTs } : {}),
       });
     }
   }
 
-  // 4. Current-TF confirmed Williams fractals (max 2 highs + 2 lows).
-  if (prefs.fractals) {
-    const baseRow = report.mtf.rows[0];
-    if (baseRow && !baseRow.insufficient) {
-      for (const p of baseRow.recentPivots) {
-        const upBias = p.rel === 'HH' || p.rel === 'HL';
-        const downBias = p.rel === 'LH' || p.rel === 'LL';
-        const tone: AnnTone = upBias ? 'long' : downBias ? 'short' : 'neck';
-        const high = p.kind === 'high';
-        const side: 'above' | 'below' = high ? 'above' : 'below';
-        const diff = p.price - p.prevPrice;
-        const versus = p.rel === 'EQH' || p.rel === 'EQL'
-          ? `和前一个${high ? '高点' : '低点'} ${fmt(p.prevPrice)} 几乎一样（差 ${fmt(Math.abs(diff))}）。`
-          : `比前一个${high ? '高点' : '低点'} ${fmt(p.prevPrice)} ${diff > 0 ? '高' : '低'} ${fmt(Math.abs(diff))}。`;
-        putEvent({
-          id: `fw:frac:${p.ts}:${p.kind}`,
-          ts: p.ts,
-          side,
-          tone,
-          text: prefs.labels ? p.rel : '',
-          priority: 62,
-          marker: 'tri',
-          // 分形要等右侧 2 根收盘：标记画在极值那根，虚线小尾巴指到真正确认的那根
-          confirmTs: p.confirmedAt - barMs,
-          title: `${REL_DESC[p.rel]} · ${fmt(p.price)}`,
-          detail: [
-            `${REL_MEANING[p.rel]}${versus}`,
-            `${baseRow.tf} 小波段：左右各 2 根都${high ? '更低' : '更高'}才算；${fmtTime(p.confirmedAt)} 才确认，标在极值那根。`,
-          ],
-        });
-      }
-    }
-  }
-
-  // 5. Compact MTF + 4-framework summary HUD (independent of fractal candle markers toggle).
-  const c = report.confluence;
-  const hudVerdict: FrameworkHud['verdict'] =
-    c.verdict === 'long' || c.verdict === 'lean_long'
-      ? '偏多'
-      : c.verdict === 'short' || c.verdict === 'lean_short'
-        ? '偏空'
-        : '中性';
-  const hudTone: AnnTone = hudVerdict === '偏多' ? 'long' : hudVerdict === '偏空' ? 'short' : 'neck';
-  const usable = report.mtf.rows.filter(r => !r.insufficient);
+  // 6. 右上角盘面
+  const read = readMarket({ report, scene, refs, fmt, fmtR, when: ts => when(ts), barMs });
+  const hudTone: AnnTone = read.verdict === '偏多' ? 'long' : read.verdict === '偏空' ? 'short' : 'neck';
   const hud: FrameworkHud = {
     rows: report.mtf.rows.map(r => ({
       tf: r.tf,
       bias: r.bias,
       insufficient: r.insufficient,
       arrow: r.insufficient ? '—' : r.bias === 'bull' ? '↑' : r.bias === 'bear' ? '↓' : '—',
+      word: r.insufficient ? '—' : BIAS_WORD[r.bias] === '方向不明' ? '—' : BIAS_WORD[r.bias],
     })),
-    verdict: hudVerdict,
+    verdict: read.verdict,
     tone: hudTone,
     phase: PHASE_TEXT[report.wyckoff.phase] ?? '未知',
-    title: `多周期 & 四框架汇总 · ${hudVerdict}`,
-    detail: [
-      `多周期结构：${usable.length ? usable.map(r => `${r.tf} ${BIAS_TEXT[r.bias]}`).join(' · ') : '高级别 K 线还不够'}${report.mtf.verdict === 'mixed' ? '（没有形成同向共振）' : ''}。`,
-      `Wyckoff 阶段：${PHASE_TEXT[report.wyckoff.phase] ?? report.wyckoff.phase}。`,
-      `四框架汇总：${hudVerdict}（偏多 ${c.long} · 偏空 ${c.short} · 中性 ${c.neutral}${c.unavailable ? ` · 无数据 ${c.unavailable}` : ''}）${hudVerdict === '中性' && c.long + c.short === 1 ? '，只有 1 个视角有方向，不算共振' : ''}。`,
-      '四个视角用的是同一份 K 线，只是不同看法，不是胜率或下单建议。',
-    ],
+    title: `盘面：${read.headline}`,
+    detail: read.lines,
   };
 
+  // 亚盘线由时段图层画；它们已经并进带里说过，不再单独出右侧标签
+  const extras2 = extraLevels.map(l => ({ ...l, label: false }));
   return {
     payload: {
-      levels,
-      events: [...eventMap.values()],
+      levels: [...levels, ...extras2],
+      events,
       zones,
       paths: [],
       position: null,
@@ -484,3 +465,4 @@ export function projectFrameworkMarks(
     hud,
   };
 }
+

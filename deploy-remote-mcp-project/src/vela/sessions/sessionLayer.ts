@@ -30,7 +30,6 @@ export const SESSION_UNDER_ID = 'pd-session-under';
 export const SESSION_OVER_ID = 'pd-session-over';
 
 const FONT_BADGE = "500 10px 'IBM Plex Mono', 'PingFang SC', 'Microsoft YaHei', sans-serif";
-const FONT_TAG = "500 10px 'IBM Plex Mono', 'PingFang SC', 'Microsoft YaHei', sans-serif";
 
 /** 底部丝带轨道高度：徽标与下划线都限制在这条轨道内 */
 const RIBBON_H = 38;
@@ -39,15 +38,6 @@ const BADGE_H = 20;
 const RIBBON_LEFT = 44;
 
 type Ctx2D = CanvasRenderingContext2D;
-
-function inferPriceDecimals(bars: readonly BarLike[]): number {
-  if (!bars.length) return 2;
-  const p = bars[bars.length - 1].close;
-  if (p >= 1000) return 1;
-  if (p >= 10) return 2;
-  if (p >= 1) return 3;
-  return 4;
-}
 
 function drawRoundedPill(
   ctx: Ctx2D,
@@ -338,8 +328,6 @@ function renderSessionOver(canvas: HTMLCanvasElement | null, args: RendererLayer
 
   const X = (ms: number) => coords.timeToX(ms);
   const Y = (price: number) => coords.priceToY(price, scale, bounds);
-  const decimals = inferPriceDecimals(bars);
-  const lastCloseY = Y(bars[bars.length - 1].close);
 
   // 底部丝带轨道：所有时段文字/下划线都限制在 plotBottom - RIBBON_H 之内，
   // 不侵占顶部 OHLC 读数，也不堆叠到 K 线实体上。
@@ -407,76 +395,20 @@ function renderSessionOver(canvas: HTMLCanvasElement | null, args: RendererLayer
     }
   }
 
-  // 2. AH / AL：扫荡菱形标记 + 右缘吸附价格签（不再把大胶囊压在 K 线上）
+  // 2. AH / AL：扫荡菱形标记。右侧价格标签改由四框架图层的右侧轨道统一排版
+  //    （asiaRail.ts：只给仍有效的价位、写明今日 / 昨日、与前高前低互相避让并可悬停）。
   if (prefs.showAsiaRange) {
     const asiaSummaries = getAsiaSummaries(bars, range);
-    ctx.font = FONT_TAG;
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
-
-    const drawEdgeTag = (
-      yPrice: number,
-      label: string,
-      bg: string,
-      border: string,
-      fg: string,
-    ) => {
-      // 与最新价标签垂直距离过近时让位，避免右缘标签堆叠
-      if (Math.abs(yPrice - lastCloseY) < 18) return;
-      if (yPrice < plotTop + 4 || yPrice > ribbonTop - 4) return;
-      const tw = ctx.measureText(label).width;
-      const pw = Math.ceil(tw + 10);
-      const ph = 15;
-      const lx = W - pw - 2;
-      const ly = Math.max(plotTop + 2, Math.min(ribbonTop - ph - 2, Math.round(yPrice) - ph / 2));
-      drawRoundedPill(ctx, lx, ly, pw, ph, 3, bg, border);
-      ctx.fillStyle = fg;
-      ctx.fillText(label, lx + 5, ly + ph / 2 + 0.5);
-    };
-
     for (const ar of asiaSummaries) {
       const ahEndX = X(ar.highLineEndMs);
       const yHigh = Y(ar.high);
-      if (ahEndX > 20 && ahEndX < W && yHigh >= plotTop && yHigh <= plotBottom) {
-        if (ar.highTouchMs != null) {
-          drawDiamond(
-            ctx,
-            ahEndX,
-            yHigh,
-            3.5,
-            ar.highState === 'swept_reject' ? '#f59e0b' : '#a78bfa',
-            '#0f172a',
-          );
-        }
-        drawEdgeTag(
-          yHigh,
-          `亚太交易时段高点 ${ar.high.toFixed(decimals)}`,
-          ar.highState === 'swept_reject' ? 'rgba(45, 27, 10, 0.92)' : 'rgba(24, 19, 42, 0.9)',
-          ar.highState === 'swept_reject' ? 'rgba(245, 158, 11, 0.55)' : 'rgba(167, 139, 250, 0.42)',
-          ar.highState === 'swept_reject' ? '#fcd34d' : '#ddd6fe',
-        );
+      if (ar.highTouchMs != null && ahEndX > 20 && ahEndX < W && yHigh >= plotTop && yHigh <= ribbonTop) {
+        drawDiamond(ctx, ahEndX, yHigh, 3.5, ar.highState === 'swept_reject' ? '#f59e0b' : '#a78bfa', '#0f172a');
       }
-
       const alEndX = X(ar.lowLineEndMs);
       const yLow = Y(ar.low);
-      if (alEndX > 20 && alEndX < W && yLow >= plotTop && yLow <= plotBottom) {
-        if (ar.lowTouchMs != null) {
-          drawDiamond(
-            ctx,
-            alEndX,
-            yLow,
-            3.5,
-            ar.lowState === 'swept_reject' ? '#10b981' : '#38bdf8',
-            '#0f172a',
-          );
-        }
-        drawEdgeTag(
-          yLow,
-          `亚太交易时段低点 ${ar.low.toFixed(decimals)}`,
-          ar.lowState === 'swept_reject' ? 'rgba(10, 38, 30, 0.92)' : 'rgba(12, 28, 44, 0.9)',
-          ar.lowState === 'swept_reject' ? 'rgba(16, 185, 129, 0.55)' : 'rgba(56, 189, 248, 0.42)',
-          ar.lowState === 'swept_reject' ? '#6ee7b7' : '#bae6fd',
-        );
+      if (ar.lowTouchMs != null && alEndX > 20 && alEndX < W && yLow >= plotTop && yLow <= ribbonTop) {
+        drawDiamond(ctx, alEndX, yLow, 3.5, ar.lowState === 'swept_reject' ? '#10b981' : '#38bdf8', '#0f172a');
       }
     }
   }

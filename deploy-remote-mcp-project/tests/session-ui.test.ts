@@ -28,8 +28,10 @@ assert.ok(terminal.includes("unregisterWidgetAction('pd-price-action')"));
 assert.ok(!terminal.includes('registerPriceActionPanel'));
 const layer = readFileSync('src/vela/sessions/sessionLayer.ts', 'utf8');
 assert.ok(layer.includes('prefs.bandOpacity / 100'));
-assert.ok(layer.includes('亚太交易时段高点'));
-assert.ok(layer.includes('亚太交易时段低点'));
+// 亚盘高低点的右侧标签改由四框架右侧轨道统一排版（asiaRail.ts），时段图层只画线与菱形
+const rail = readFileSync('src/vela/sessions/asiaRail.ts', 'utf8');
+assert.ok(rail.includes('亚盘${high ? \'高\' : \'低\'}'));
+assert.ok(!layer.includes('drawEdgeTag'));
 assert.ok(!layer.includes('`AH '));
 assert.ok(!layer.includes('`AL '));
 console.log('session-ui: opacity persistence, complete Chinese labels and retired audit panel passed');

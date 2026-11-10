@@ -330,14 +330,76 @@ export function placeCard(cursor: { x: number; y: number }, w: number, h: number
 }
 
 /** 按像素宽度折行（中英文混排，逐字测量） */
+/**
+ * 右侧价格标签文字，按从长到短给出候选（放不下就用下一个）。
+ * items 为同一价位上要显示文字的成员，按优先级从高到低（第一个是主名）。
+ * 同一价位的两个不同含义并排写「前低 · 今日亚盘低 85.45」，再多才折成「+N」。
+ */
+export function railLabelTexts(
+  items: readonly { name: string; note?: string }[],
+  folded: number,
+  priceTxt: string,
+  priceShort: string,
+): { pairName: string; tries: string[] } {
+  const lead = items[0];
+  const second = items.find(i => i.name !== lead.name)?.name;
+  const pairName = second ? `${lead.name} · ${second}` : lead.name;
+  const extra = items.filter(i => i.name !== lead.name && i.name !== second).length + folded;
+  const suffix = extra > 0 ? ` +${extra}` : '';
+  const extraSingle = items.filter(i => i.name !== lead.name).length + folded;
+  const suffixSingle = extraSingle > 0 ? ` +${extraSingle}` : '';
+  // 空间不够时依次退：去掉补充短字 → 只留主名 → 名字第一个词 → 只剩价格
+  const shortName = lead.name.split(/[ （·]/)[0];
+  const tries = [
+    `${pairName} ${priceTxt}${lead.note ?? ''}${suffix}`,
+    `${pairName} ${priceShort}${suffix}`,
+    ...(second ? [`${lead.name} ${priceShort}${suffixSingle}`] : []),
+    `${shortName} ${priceShort}${suffixSingle}`,
+    `${priceShort}${suffixSingle}`,
+  ];
+  return { pairName, tries: [...new Set(tries)] };
+}
+
+/** 不能出现在行首的标点（句号、逗号、右括号等）：放不下时悬挂在上一行末尾 */
+const NO_LINE_START = new Set([...'。，、；：！？）」』】》〉…%,.;:!?)]}']);
+/** 不能留在行尾的左括号 / 引号：随下一个字一起换到下一行 */
+const NO_LINE_END = new Set([...'（「『【《〈([{']);
+
+/** 数字、价格区间、时间、英文缩写连在一起不拆：「74406.4–74585.8」「19:35」「FVG↓」 */
+const WORD_CHAR = /[0-9A-Za-z.:%×↑↓+\-–?]/;
+function wrapTokens(text: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const ch of text) {
+    if (WORD_CHAR.test(ch)) { cur += ch; continue; }
+    if (cur) { out.push(cur); cur = ''; }
+    out.push(ch);
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 export function wrapText(text: string, maxW: number, measure: (s: string) => number): string[] {
   const out: string[] = [];
   let line = '';
-  for (const ch of text) {
-    const next = line + ch;
+  // 单个词本身就比一行还宽时才逐字拆
+  const tokens = wrapTokens(text).flatMap(tok => (tok.length > 1 && measure(tok) > maxW ? [...tok] : [tok]));
+  for (const tok of tokens) {
+    const next = line + tok;
     if (line && measure(next) > maxW) {
-      out.push(line);
-      line = ch.trimStart();
+      if (tok.length === 1 && NO_LINE_START.has(tok)) {
+        // 中文排版的标点悬挂：宁可超出一个标点宽度，也不让「。」单独起一行
+        line = next;
+        continue;
+      }
+      const tail = line.at(-1) ?? '';
+      if (NO_LINE_END.has(tail) && line.length > 1) {
+        out.push(line.slice(0, -1));
+        line = tail + tok;
+      } else {
+        out.push(line);
+        line = tok.trimStart();
+      }
     } else {
       line = next;
     }

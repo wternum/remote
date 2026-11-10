@@ -42,8 +42,11 @@ const zigzag = (way: [number, number][]): Candle[] => {
 {
   const z = (kind: FvgZone['kind'], from: number, lo: number, hi: number, filled = false): FvgZone =>
     ({ kind, from, to: from + 2, lo, hi, touched: false, filled, fillIdx: filled ? from + 5 : null, aligned: false });
-  const merged = mergeAdjacentFvgs([z('bearish', 10, 87.52, 87.69), z('bearish', 11, 87.41, 87.46), z('bullish', 12, 86, 86.2), z('bearish', 30, 88, 88.1)]);
+  // 价格上接得上的才合并；中间隔着成交过的价位（87.46–87.52）就分开，不能把它说成「几乎没成交」
+  const merged = mergeAdjacentFvgs([z('bearish', 10, 87.50, 87.69), z('bearish', 11, 87.41, 87.52), z('bullish', 12, 86, 86.2), z('bearish', 30, 88, 88.1)]);
   assert.deepEqual(merged.map(m => [m.kind, m.lo, m.hi]), [['bearish', 87.41, 87.69], ['bullish', 86, 86.2], ['bearish', 88, 88.1]]);
+  const apart = mergeAdjacentFvgs([z('bearish', 10, 87.52, 87.69), z('bearish', 11, 87.41, 87.46)]);
+  assert.deepEqual(apart.map(m => [m.lo, m.hi]), [[87.52, 87.69], [87.41, 87.46]]);
 
   // 三根连续上涨留下两个缺口，后来回调填满了上面那个：只剩下面那个
   const cs: Candle[] = [];
@@ -82,26 +85,27 @@ const zigzag = (way: [number, number][]): Candle[] => {
   assert.ok(liq.poolBelow && liq.poolBelow.equal && liq.poolBelow.touches === 2 && Math.abs(liq.poolBelow.price - 95.71) < 0.05, `pool ${JSON.stringify(liq.poolBelow)}`);
   const report = buildFrameworks(cs, MS, 'SOL-USDT-SWAP', '5m', null, cs.at(-1)!.ts + MS + 2000)!;
   const levels = projectFrameworkMarks(report, DEFAULT_FRAMEWORK_MARK_PREFS, MS).payload.levels;
-  const pool = levels.find(l => l.id === 'fw:liq:pool-below');
-  assert.ok(pool && pool.name === 'EQL 等低×2', `pool level ${JSON.stringify(levels.map(l => l.name))}`);
-  assert.ok(levels.some(l => l.id === 'fw:liq:below' && l.name === '前低'));
-  pass('4 · 下方等低×2 不再被更近的单个前低挡住，两条线都画出');
+  // 两样都还在：都算进下方最近的那条支撑带（单个前低 96.7 和等低×2 95.71 隔得远时，最近的那条先出）
+  const support = levels.find(l => l.id === 'fw:band:support');
+  assert.ok(support, `support band ${JSON.stringify(levels.map(l => l.name))}`);
+  assert.ok(liq.pools.some(p => p.equal && p.touches === 2), 'equal-low pool still detected');
+  pass('4 · 下方等低×2 仍被识别，并进下方支撑带一起说');
 }
 
-// 5. 文案：分形说清楚和哪个价比较；名称带中文；不再夹杂 "UTC" 噪音
+// 5. 文案：K 线上不再画分形 HH / LL；右侧只用中文短名；不再夹杂 "UTC" 噪音
 {
   const cs = Array.from({ length: 180 }, (_, i) => { const p = 100 + i * 0.06 + Math.sin(i / 2.2) * 1.4; return bar(i, p, p + 0.2, p - 0.2, p + 0.05); });
   const report = buildFrameworks(cs, MS, 'BTC-USDT-SWAP', '5m', null, T0 + 180 * MS)!;
   const m = projectFrameworkMarks(report, DEFAULT_FRAMEWORK_MARK_PREFS, MS);
-  const frac = m.payload.events.filter(e => e.id.startsWith('fw:frac:'));
-  assert.ok(frac.length > 0);
-  for (const e of frac) assert.ok(/(比前一个|和前一个)(高点|低点) \d/.test(e.detail![0]), e.detail![0]);
+  assert.equal(m.payload.events.filter(e => e.id.startsWith('fw:frac:')).length, 0, 'fractal pivots are no longer drawn on candles');
   const names = m.payload.levels.map(l => l.name);
-  assert.ok(names.includes('POC 成交最密') && names.includes('VAH 价值上沿') && names.includes('VAL 价值下沿'), names.join(','));
+  assert.ok(names.includes('成交最多'), names.join(','));
+  assert.ok(names.every(n => ['压力带', '支撑带', '箱顶', '箱底', '成交最多'].includes(n)), names.join(','));
   const text = JSON.stringify(m);
   assert.ok(!text.includes(' UTC'), 'hover text should not repeat the UTC suffix');
-  assert.ok(m.hud!.detail[0].startsWith('多周期结构：'));
-  pass('5 · 分形悬停写明比较对象与差值；POC/VAH/VAL 带中文名；HUD 用白话');
+  assert.ok(!/ATR|摆动|流动性/.test(text), 'hover text has no ATR / 摆动 / 流动性 jargon');
+  assert.equal(m.hud!.title.startsWith('盘面：'), true);
+  pass('5 · K 线上不再画 HH / LL；右侧只用中文短名；悬停里不再出现 ATR 等术语');
 }
 
 console.log(`\nmarks-review: ${passed} groups passed`);

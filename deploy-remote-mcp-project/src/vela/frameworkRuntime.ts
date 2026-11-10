@@ -4,11 +4,15 @@ import { barsHub } from './okxProvider';
 import { flowPeriodOf, getFlow, releaseTape, subscribeFlow, syncFlow } from '@/quant/flow';
 import { buildFrameworks, type FrameworkReport } from '@/quant/frameworks';
 import { labelOf } from '@/quant/fractal';
-import { projectFrameworkMarks } from '@/quant/frameworkMarks';
+import { projectFrameworkMarks, type FrameworkHud } from '@/quant/frameworkMarks';
 import type { AnnObstacle } from './annotTypes';
 import { FW_OVER, FW_UNDER, registerFrameworkLayers, type FrameworkLayerData } from './frameworkLayer';
 import { getFrameworkMarkStore } from './frameworkMarkStore';
 import { isClosedCandle } from '@/lib/okxCandles';
+import { decimalsFor } from './annotTypes';
+import { getSessionStore } from './sessions/sessionStore';
+import { asiaRailLevels, asiaRefs } from './sessions/asiaRail';
+import type { BarLike } from './sessions/sessionMath';
 import {
   DEFAULT_FRAMEWORK_MARKET,
   frameworkInputKey,
@@ -28,6 +32,8 @@ export interface FrameworkLiveSnapshot {
   status: FrameworkStatus;
   message: string;
   updatedAt: number;
+  /** 图上右上角的盘面（底栏「标注」按钮显示同一个结论）；标注关闭时为 null */
+  hud?: FrameworkHud | null;
 }
 
 const DEFAULT_MARKET: FrameworkMarket = DEFAULT_FRAMEWORK_MARKET;
@@ -73,8 +79,12 @@ export const frameworkLiveStore = {
 
 type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: FrameworkLayerData) => void } };
 
+/** 亚盘高低点只在日内周期、时段图层与「亚盘高低点」开关都打开时出标签（与时段图层同一口径） */
+const INTRADAY_MAX_BAR_MS = 12 * 3_600_000;
+
 function mountFrameworkRuntime(ctx: WidgetContext): () => void {
   const markStore = getFrameworkMarkStore();
+  const sessionStore = getSessionStore();
   let alive = true;
   let chart: Vela | null = null;
   let chartOff: (() => void)[] = [];
@@ -168,11 +178,27 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     }
   };
 
+  const asiaLevels = () => {
+    const sp = sessionStore.getSnapshot().preferences;
+    if (!sp.enabled || !sp.showAsiaRange || !(market.barMs < INTRADAY_MAX_BAR_MS) || !isSupportedFrameworkSymbol(market.symbol)) return { levels: [], refs: [], lastClose: NaN };
+    const raw = barsHub.get(market.symbol, market.tf) as readonly BarLike[];
+    return { levels: asiaRailLevels(raw), refs: asiaRefs(raw), lastClose: raw.at(-1)?.close ?? NaN };
+  };
+
   const paint = (force = false) => {
     if (!chart) return;
     const prefs = markStore.getSnapshot();
-    const projected = projectFrameworkMarks(cachedReport, prefs, market.barMs);
+    // 亚盘标签属于时段图层的开关，不受「图表标注 开/关」影响；它们和四框架的线一起合带、一起配合着说
+    const asia = asiaLevels();
+    const projected = projectFrameworkMarks(cachedReport, prefs, market.barMs, { extraLevels: asia.levels, refs: asia.refs });
     projected.payload.obstacles = prefs.enabled ? obstacles() : [];
+    if (!cachedReport && asia.levels.length && Number.isFinite(asia.lastClose)) projected.payload.decimals = decimalsFor(asia.lastClose);
+    const hud = projected.hud;
+    const prevHud = liveState.hud ?? null;
+    const hudKey = (h: FrameworkHud | null) => (h ? `${h.title}|${h.detail.join('|')}` : '');
+    if (hudKey(hud) !== hudKey(prevHud)) {
+      publishLive({ ...liveState, hud });
+    }
     const nextSig = JSON.stringify(projected);
     if (!force && nextSig === paintFingerprint) return;
     paintFingerprint = nextSig;
@@ -328,6 +354,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     if (snap.instId === market.symbol && snap.period === flowPeriodOf(market.tf)) schedule();
   });
   const offMarks = markStore.subscribe(() => paint());
+  const offSession = sessionStore.subscribe(() => paint());
 
   const ownHook = () => {
     const c = getChart();
@@ -348,6 +375,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     offBars();
     offFlow();
     offMarks();
+    offSession();
     chartOff.splice(0).forEach(off => off());
     try {
       const port = (chart as unknown as ChartPort | null)?.rendererPort;

@@ -13,12 +13,18 @@ type ChartPort = { rendererPort?: { setNativeData?: (id: string, payload: AnnPay
 const blankAnalysis = (requested = 600): SignalAnalysis => ({ items: [], covered: 0, bars: 0, requested, gapTruncated: false, historyShort: false, lastPrice: 0 });
 
 /**
- * 图表标记已整体下线：画布不再接收 payload，侧栏也隐藏无效开关。
- * 此时 analyzeSignals + projectSignals 的产物没有任何消费者，跳过整段计算；
- * 订单流同步已交由 frameworkRuntime 独立维护（按 owner 引用计数）。
- * 恢复标记时把此开关改回 true 即可，检测/排版模块与单测均原样保留。
+ * 双顶 / 双底（M/W）图表标记开关。2026-11-06 曾整体下线，2026-11-10 按用户要求重新打开：
+ * 默认只画双顶、双底及其情景区（关键位 / 回踩 / 主动成交等其余类型默认关闭，避免和四框架标注重复）。
+ * 关掉时 analyzeSignals + projectSignals 整段跳过，订单流同步由 frameworkRuntime 独立维护。
  */
-export const MARKERS_ENABLED = false;
+export const MARKERS_ENABLED = true;
+
+/**
+ * 双顶 / 双底是否单独画在图上。2026-11-10 用户确认的精简方案：不再单独画一套线、折线、情景区和右侧标签 ——
+ * 双顶的两个高点就是压力带 / 箱顶，颈线就是支撑带 / 箱底，由四框架标注统一说一次。
+ * 识别与侧栏「双顶双底」记录照常（MARKERS_ENABLED 仍为 true）。
+ */
+export const MW_ON_CHART = false;
 
 /** The runtime belongs to the workspace, never the panel. Closing the sidebar leaves it alive. */
 export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () => void {
@@ -73,7 +79,7 @@ export function mountSignalRuntime(ctx: WidgetContext, store: SignalStore): () =
       : { payload: emptySignalPayload(), visible: [], counts: emptyCounts() };
     // 标记下线期间恒下发空 payload；write() 内部按指纹去重，只有首次真正触达图层。
     if (MARKERS_ENABLED && preferences.enabled) projected.payload.obstacles = obstacles();
-    write(projected.payload);
+    write(MW_ON_CHART ? projected.payload : emptySignalPayload());
     const period = flowPeriodOf(timeframe);
     const snap = period ? getFlow(symbol, period) : undefined;
     store.updateRuntime({

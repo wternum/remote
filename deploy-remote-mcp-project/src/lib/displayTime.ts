@@ -27,6 +27,19 @@ export function fmtMonthDay(ts: number): string {
   return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
+/**
+ * 相对参考时刻的北京时间：同一天 "13:50"，前一天 "昨天 13:50"，更早 "11-08 13:50"。
+ * 悬停文案用它，避免每条都带日期。
+ */
+export function fmtWhen(ts: number | null | undefined, refTs: number): string {
+  if (ts == null || !Number.isFinite(ts)) return '—';
+  const day = displayDayFloor(ts);
+  const today = displayDayFloor(refTs);
+  if (day === today) return fmtClock(ts);
+  if (day === today - DAY_MS) return `昨天 ${fmtClock(ts)}`;
+  return fmtDateTime(ts);
+}
+
 /** 某时刻所在北京自然日的 00:00（返回 UTC 毫秒） */
 export function displayDayFloor(ts: number): number {
   return Math.floor((ts + DISPLAY_OFFSET_MS) / DAY_MS) * DAY_MS - DISPLAY_OFFSET_MS;

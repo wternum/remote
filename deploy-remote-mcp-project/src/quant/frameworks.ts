@@ -57,7 +57,12 @@ export interface FrameworkReport {
   wyckoff: WyckoffRead;
   auction: AuctionRead;
   confluence: Confluence;
+  /** 最近 160 根已收盘 K 线（图上说「哪根冲到哪、收在哪」、缺口补到哪用） */
+  recent: RecentBar[];
 }
+
+export interface RecentBar { ts: number; o: number; h: number; l: number; c: number }
+export const RECENT_BARS = 160;
 
 const validBar = (c: Candle | undefined): c is Candle => !!c &&
   [c.ts, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite) &&
@@ -197,5 +202,6 @@ export function buildFrameworks(
     symbol, bar, lastPrice: last.c, lastTs: last.ts, bars: closed.length, atr: r3(atr),
     coverage: r3(coverage), source: coverage >= 0.5 ? 'real' : 'price', quality,
     liquidity, mtf, wyckoff, auction, confluence,
+    recent: closed.slice(-RECENT_BARS).map(c => ({ ts: c.ts, o: c.o, h: c.h, l: c.l, c: c.c })),
   };
 }

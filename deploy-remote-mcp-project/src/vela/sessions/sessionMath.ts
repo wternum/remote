@@ -79,6 +79,12 @@ export interface AsiaRangeSummary {
   lowLineEndMs: number;
   lowState: AsiaSweepState;
   lowTouchMs: number | null;
+  /**
+   * 到最新一根已收盘 K 线为止仍没被碰过（线一直延伸到现在）。只有当天和前一天的亚盘会判断，
+   * 右侧价格标签只给仍有效的价位，避免已结束的旧线在右边留一个孤零零的标签。
+   */
+  highLive: boolean;
+  lowLive: boolean;
 }
 
 export interface BarLike {
@@ -426,6 +432,7 @@ export function computeAsiaRangeLevels(
   }
 
   const summaries: AsiaRangeSummary[] = [];
+  const currentDay = utcDayFloor(lastBarTime);
   for (const [dayStartMs, dayBars] of dayMap.entries()) {
     const asiaStartMs = dayStartMs;
     const asiaEndMs = dayStartMs + 8 * 3600_000; // 08:00 UTC
@@ -499,6 +506,46 @@ export function computeAsiaRangeLevels(
       if (highState === 'broken' && lowState === 'broken') break;
     }
 
+    // 前一天没被碰过的亚盘高低点延续到今天：继续用今天的已收盘 K 线判断扫位 / 突破，
+    // 一直没碰到就把线画到最新一根（仍有效）。更早的日子不延续，免得图上全是旧线。
+    let highLive = dayStartMs === currentDay && highState === 'untouched';
+    let lowLive = dayStartMs === currentDay && lowState === 'untouched';
+    if (dayStartMs === currentDay - DAY_MS && (highState === 'untouched' || lowState === 'untouched')) {
+      const carryHigh = highState === 'untouched';
+      const carryLow = lowState === 'untouched';
+      for (const b of closedBars) {
+        if (b.time < dayEndMs) continue;
+        if (carryHigh) {
+          if (highState === 'untouched') {
+            if (b.high > high) {
+              highTouchMs = b.time;
+              highLineEndMs = b.time;
+              highState = b.close <= high ? 'swept_reject' : 'broken';
+            }
+          } else if (highState === 'swept_reject' && b.close > high) {
+            highTouchMs = b.time;
+            highLineEndMs = b.time;
+            highState = 'broken';
+          }
+        }
+        if (carryLow) {
+          if (lowState === 'untouched') {
+            if (b.low < low) {
+              lowTouchMs = b.time;
+              lowLineEndMs = b.time;
+              lowState = b.close >= low ? 'swept_reject' : 'broken';
+            }
+          } else if (lowState === 'swept_reject' && b.close < low) {
+            lowTouchMs = b.time;
+            lowLineEndMs = b.time;
+            lowState = 'broken';
+          }
+        }
+      }
+      if (carryHigh && highState === 'untouched') { highLineEndMs = lastBarTime; highLive = true; }
+      if (carryLow && lowState === 'untouched') { lowLineEndMs = lastBarTime; lowLive = true; }
+    }
+
     const rangePct = ((high - low) / low) * 100;
     summaries.push({
       dayStartMs,
@@ -518,6 +565,8 @@ export function computeAsiaRangeLevels(
       lowLineEndMs,
       lowState,
       lowTouchMs,
+      highLive,
+      lowLive,
     });
   }
 

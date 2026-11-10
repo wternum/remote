@@ -6,14 +6,13 @@ import type { FrameworkMarkPrefs } from '@/quant/frameworkMarks';
 import './frameworks/frameworks.css';
 
 const MARK_ITEMS: {
-  key: keyof Pick<FrameworkMarkPrefs, 'liquidity' | 'fractals' | 'wyckoffFvg' | 'amt'>;
+  key: keyof Pick<FrameworkMarkPrefs, 'liquidity' | 'wyckoffFvg' | 'amt'>;
   label: string;
   legend: string;
 }[] = [
-  { key: 'liquidity', label: '流动性 / 扫位', legend: '前高前低、扫位收回、BOS / CHoCH' },
-  { key: 'fractals', label: '分形 / MTF', legend: 'HH、HL、LH、LL 与多周期摘要' },
-  { key: 'wyckoffFvg', label: 'Wyckoff / FVG', legend: '弹簧、上冲回落、未回补失衡区' },
-  { key: 'amt', label: 'AMT 价值区', legend: 'POC、VAH、VAL；需要 quote 成交额' },
+  { key: 'liquidity', label: '突破 / 跌破', legend: '突破、跌破、假突破、假跌破；前高前低参与压力带 / 支撑带' },
+  { key: 'wyckoffFvg', label: '缺口', legend: '一口气涨跌留下、还没补的那一截' },
+  { key: 'amt', label: '成交最多价', legend: '最近一段成交最多的价格；需要交易所成交额' },
 ];
 
 type Tone = 'long' | 'short' | 'neutral' | undefined;
@@ -51,21 +50,16 @@ export default function FrameworkBar({
     };
   }, [menuOpen]);
 
-  const verdict = live.report?.confluence.verdict;
-  const bullish = verdict === 'long' || verdict === 'lean_long';
-  const bearish = verdict === 'short' || verdict === 'lean_short';
-  const tone: Tone = !prefs.enabled || live.status === 'error' ? undefined : bullish ? 'long' : bearish ? 'short' : live.report ? 'neutral' : undefined;
+  // 和图上右上角「盘面」同一个结论（不再另算一套四框架投票）
+  const verdict = live.hud?.verdict;
+  const bullish = verdict === '偏多';
+  const bearish = verdict === '偏空';
+  const tone: Tone = !prefs.enabled || live.status === 'error' ? undefined : bullish ? 'long' : bearish ? 'short' : live.hud ? 'neutral' : undefined;
   const verdictText = !prefs.enabled
     ? '关'
     : live.status === 'error'
       ? '异常'
-      : bullish
-        ? '偏多'
-        : bearish
-          ? '偏空'
-          : live.report
-            ? '中性'
-            : '等待';
+      : verdict ?? (live.report ? '观望' : '等待');
 
   return (
     <div ref={wrapRef} className="fw-bar">

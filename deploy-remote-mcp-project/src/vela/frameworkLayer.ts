@@ -11,6 +11,7 @@ import {
   mergeLevels,
   pickCandidate,
   placeCard,
+  railLabelTexts,
   wrapText,
   type Column,
   type LevelGroup,
@@ -33,6 +34,9 @@ const FONT_CARD = "400 10.5px 'IBM Plex Mono', ui-monospace, monospace";
 const LABEL_H = 14;
 const BG = 'rgba(13,17,25,0.88)';
 const MUTED_TEXT = '#c9d1e0';
+/** 悬停卡片里以「（」开头的补充说明：灰色小字 */
+const DIM_TEXT = '#7d889c';
+const FONT_DIM = "400 9.5px 'IBM Plex Mono', ui-monospace, monospace";
 
 type Ctx2D = CanvasRenderingContext2D;
 
@@ -69,7 +73,7 @@ interface Frame {
   groups: LevelGroup<LevelY>[];
   occ: Occupancy;
   barAt: (ts: number) => { x: number; top: number; bottom: number } | null;
-  last: { x: number; closeY: number } | null;
+  last: { x: number; closeY: number; close: number } | null;
 }
 
 function makeIndexCache() {
@@ -128,7 +132,7 @@ function setup(
     return { x: X(b.time), top: Y(b.high), bottom: Y(b.low) };
   };
   const lb = bars[bars.length - 1];
-  const last = { x: X(lb.time), closeY: Y(lb.close) };
+  const last = { x: X(lb.time), closeY: Y(lb.close), close: lb.close };
 
   const ys: LevelY[] = [];
   for (const l of p.levels) {
@@ -170,12 +174,40 @@ function renderUnder(f: Frame) {
     ctx.setLineDash([]);
   }
 
+  // 压力带 / 支撑带（箱顶 / 箱底）：浅色色带 + 上下两条细虚边，从带里最早那样出现的 K 线画到最右
+  for (const l of p.levels) {
+    if (!l.range || l.railOnly) continue;
+    const yTop = Y(l.range[1]);
+    const yBot = Y(l.range[0]);
+    if (!Number.isFinite(yTop) || !Number.isFinite(yBot)) continue;
+    const x0 = Math.max(0, X(l.fromTs));
+    if (x0 >= f.W) continue;
+    const top = Math.min(yTop, yBot);
+    const h = Math.max(2, Math.abs(yBot - yTop));
+    const c = TONE_COLOR[l.tone];
+    ctx.fillStyle = rgba(c, 0.1);
+    ctx.fillRect(x0, top, f.W - x0, h);
+    ctx.strokeStyle = rgba(c, 0.5);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x0, Math.round(top) + 0.5);
+    ctx.lineTo(f.W, Math.round(top) + 0.5);
+    ctx.moveTo(x0, Math.round(top + h) - 0.5);
+    ctx.lineTo(f.W, Math.round(top + h) - 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   for (const g of groups) {
-    const l = g.lead;
+    // railOnly 的价位（亚盘高低点）由时段图层自己画线；色带上面已经画过；这里只画其余的线
+    const drawn = g.items.filter(i => !i.railOnly && !i.range);
+    if (!drawn.length) continue;
+    const l = drawn.reduce((a, b) => (b.priority > a.priority ? b : a));
     const c = TONE_COLOR[l.tone];
     const a = RANK_ALPHA[l.rank];
-    const x0 = Math.min(...g.items.map(i => i.x0));
-    const x1 = Math.max(...g.items.map(i => i.x1));
+    const x0 = Math.min(...drawn.map(i => i.x0));
+    const x1 = Math.max(...drawn.map(i => i.x1));
     if (g.yBottom - g.yTop >= 1.5) {
       ctx.fillStyle = rgba(c, Math.min(0.14, a * 0.22));
       ctx.fillRect(x0, g.yTop - 1, x1 - x0, g.yBottom - g.yTop + 2);
@@ -253,7 +285,8 @@ function leader(ctx: Ctx2D, pts: [number, number][], color: string) {
 function obstaclesOf(f: Frame): Rect[] {
   const { plot, X, Y, W, p } = f;
   // Reserve top-left OHLC legend + bottom session ribbon when height permits.
-  const out: Rect[] = [{ x: 0, y: plot.y, w: Math.min(340, W * 0.46), h: 46 }];
+  // 图例第一行带开高低收和涨跌，实际宽到 ~560px，按这个宽度避让
+  const out: Rect[] = [{ x: 0, y: plot.y, w: legendWidth(W), h: 46 }];
   if (plot.h > 140) out.push({ x: 0, y: plot.y + plot.h - 42, w: W, h: 42 });
   for (const o of p.obstacles) {
     if (o.kind === 'hline') {
@@ -273,15 +306,17 @@ function obstaclesOf(f: Frame): Rect[] {
   return out;
 }
 
+/** 左上角图例（品种 · 开高低收 · 涨跌）第一行的大致宽度 */
+const legendWidth = (W: number) => Math.min(580, W * 0.78);
+
 /** Compact top-right MTF + Confluence HUD pill (desktop only, reserves its rect in `taken`). */
-function renderHud(f: Frame, taken: Rect[], hits: Hit[]) {
+function renderHud(f: Frame, taken: Rect[], hits: Hit[]): Rect | null {
   const { ctx, plot, W, hud } = f;
-  if (!hud || W < 620 || plot.h < 120) return;
+  if (!hud || W < 620 || plot.h < 120) return null;
 
   const segments: { text: string; color: string }[] = [
-    { text: 'MTF', color: '#8c96ab' },
     ...hud.rows.map(r => ({
-      text: `${r.tf}${r.arrow}`,
+      text: `${r.tf} ${r.word}`,
       color: r.insufficient ? '#4b5563' : r.bias === 'bull' ? TONE_COLOR.long : r.bias === 'bear' ? TONE_COLOR.short : '#8c96ab',
     })),
     { text: `· ${hud.verdict}`, color: TONE_COLOR[hud.tone] },
@@ -293,7 +328,9 @@ function renderHud(f: Frame, taken: Rect[], hits: Hit[]) {
   const totalW = Math.ceil(widths.reduce((a, b) => a + b, 0) + gap * (segments.length - 1) + 14);
   const h = 20;
   const rect: Rect = { x: Math.round(W - totalW - 8), y: Math.round(plot.y + 8), w: totalW, h };
-  if (rect.x < Math.min(340, W * 0.46) + 8) return;
+  // 和图例第一行挤在一起时挪到第二行（第二行左边只有「成交量」，右边是空的）
+  if (rect.x < legendWidth(W) + 8) rect.y = Math.round(plot.y + 30);
+  if (rect.x < 160) return null;
 
   roundBox(ctx, rect.x, rect.y, rect.w, rect.h, 6);
   ctx.fillStyle = 'rgba(13,17,25,0.88)';
@@ -312,9 +349,10 @@ function renderHud(f: Frame, taken: Rect[], hits: Hit[]) {
   }
   taken.push(rect);
   hits.push({ rect, title: hud.title, lines: hud.detail, tone: hud.tone });
+  return rect;
 }
 
-function renderRail(f: Frame, taken: Rect[], hits: Hit[]) {
+function renderRail(f: Frame, taken: Rect[], hits: Hit[], hudRect: Rect | null = null) {
   const { ctx, plot, W, bw, fmt, groups, last, occ } = f;
   type Entry = { g: LevelGroup<LevelY>; lead: LevelY; labeled: LevelY[] };
   const pool: Entry[] = [];
@@ -331,7 +369,8 @@ function renderRail(f: Frame, taken: Rect[], hits: Hit[]) {
   const entries = pool.filter(e => (e.lead.rank !== 'normal' && e.lead.rank !== 'faint') || keepNormal.has(e));
   const byId = new Map(entries.map(e => [e.lead.id, e]));
 
-  const topBound = plot.y + (f.hud && W >= 620 ? 34 : 2);
+  // 右侧标签从右上角汇总下面开始排（汇总可能被挪到第二行）
+  const topBound = hudRect ? hudRect.y + hudRect.h + 4 : plot.y + 2;
   const bottomBound = plot.y + plot.h - (plot.h > 140 ? 44 : 2);
   const placed = layoutRail(
     entries.map(e => ({ id: e.lead.id, y: e.g.y, h: LABEL_H, priority: e.lead.priority })),
@@ -349,15 +388,12 @@ function renderRail(f: Frame, taken: Rect[], hits: Hit[]) {
     const sameName = labeled.filter(i => i.name === lead.name);
     const lo = Math.min(...sameName.map(i => i.price));
     const hi = Math.max(...sameName.map(i => i.price));
-    const priceTxt = hi - lo > 0 ? `${fmt(lo)}–${fmt(hi)}` : fmt(lead.price);
-    const priceShort = hi - lo > 0 ? `${fmtShort(lo)}–${fmtShort(hi)}` : fmtShort(lead.price);
-    const extra = labeled.length - sameName.length + r.folded.length;
-    const suffix = extra > 0 ? ` +${extra}` : '';
-    const full = `${lead.name} ${priceTxt}${suffix}`;
+    const span = lead.range ?? (hi - lo > 0 ? [lo, hi] as [number, number] : null);
+    const priceTxt = span ? `${fmt(span[0])}–${fmt(span[1])}` : fmt(lead.price);
+    const priceShort = span ? `${fmtShort(span[0])}–${fmtShort(span[1])}` : fmtShort(lead.price);
+    // 同一价位的两个不同含义直接并排写出（「前低 · 今日亚盘低 85.45」），再多才折成 +N
+    const { pairName, tries } = railLabelTexts(labeled, r.folded.length, priceTxt, priceShort);
     const y0 = Math.round(r.y - LABEL_H / 2);
-    // 名称形如「POC 成交最密」：空间不够时先退到短名「POC 86.52」，最后才只剩价格
-    const shortName = lead.name.split(' ')[0];
-    const tries = [full, `${lead.name} ${priceShort}${suffix}`, `${shortName} ${priceShort}${suffix}`, `${priceShort}${suffix}`];
     let text = '';
     let rect: Rect | null = null;
     for (const t of tries) {
@@ -394,7 +430,10 @@ function renderRail(f: Frame, taken: Rect[], hits: Hit[]) {
       if (!single) lines.push(`· ${it.name} ${fmt(it.price)}`);
       for (const d of it.detail ?? []) if (d) lines.push(single ? d : `  ${d}`);
     }
-    hits.push({ rect: tab ? { ...rect, x: rect.x - 4, w: rect.w + 8 } : rect, title: full.replace(suffix, ''), lines, tone: lead.tone });
+    // 标题：名字 价格（↑离现价多远），随形成中的价格实时变化
+    const diff = last ? lead.price - last.close : NaN;
+    const away = Number.isFinite(diff) ? `（${diff >= 0 ? '↑' : '↓'}${fmt(Math.abs(diff))}）` : '';
+    hits.push({ rect: tab ? { ...rect, x: rect.x - 4, w: rect.w + 8 } : rect, title: `${pairName} ${priceTxt}${away}`, lines, tone: lead.tone });
   }
 }
 
@@ -496,11 +535,17 @@ function renderCard(f: Frame, hit: Hit, cursor: { x: number; y: number }) {
   const { ctx, plot } = f;
   const maxW = Math.max(80, Math.min(310, plot.w - 16));
   const measure = (s: string) => textW(ctx, s, FONT_CARD);
-  let lines = hit.lines.flatMap(l => wrapText(l, maxW - 16, measure));
+  const measureDim = (s: string) => textW(ctx, s, FONT_DIM);
+  // 「（」开头的是补充说明：灰色小字，换行后仍保持灰色
+  let lines = hit.lines.flatMap(l => {
+    const dim = l.trimStart().startsWith('（');
+    return wrapText(l, maxW - 16, dim ? measureDim : measure).map(text => ({ text, dim }));
+  });
   const titleLines = wrapText(hit.title, maxW - 16, s => textW(ctx, s, FONT_BOLD));
   const lineBudget = Math.max(1, Math.floor((plot.h - 30 - titleLines.length * 15) / 14));
-  if (lines.length > lineBudget) lines = [...lines.slice(0, Math.max(0, lineBudget - 1)), '点击右下角「四框架分析」查看完整详情。'];
-  const w = Math.min(maxW, Math.max(...titleLines.map(s => textW(ctx, s, FONT_BOLD)), ...lines.map(measure), 60) + 16);
+  if (lines.length > lineBudget) lines = [...lines.slice(0, Math.max(0, lineBudget - 1)), { text: '点击右下角「四框架分析」查看完整详情。', dim: true }];
+  // 行尾悬挂的标点可能多出一个字宽：卡片允许略宽于换行宽度
+  const w = Math.min(maxW + 12, Math.max(...titleLines.map(s => textW(ctx, s, FONT_BOLD)), ...lines.map(l => (l.dim ? measureDim : measure)(l.text)), 60) + 16);
   const h = 8 + titleLines.length * 15 + (lines.length ? 4 + lines.length * 14 : 0) + 6;
   const r = placeCard(cursor, w, h, plot);
   roundBox(ctx, r.x, r.y, r.w, r.h, 8);
@@ -519,10 +564,10 @@ function renderCard(f: Frame, hit: Hit, cursor: { x: number; y: number }) {
     y += 15;
   }
   if (lines.length) y += 4;
-  ctx.font = FONT_CARD;
-  ctx.fillStyle = MUTED_TEXT;
   for (const l of lines) {
-    ctx.fillText(l, r.x + 8, y);
+    ctx.font = l.dim ? FONT_DIM : FONT_CARD;
+    ctx.fillStyle = l.dim ? DIM_TEXT : MUTED_TEXT;
+    ctx.fillText(l.text, r.x + 8, y + (l.dim ? 1 : 0));
     y += 14;
   }
 }
@@ -579,8 +624,8 @@ export function registerFrameworkLayers() {
           ctx.clip();
           const taken = obstaclesOf(f);
           const hits: Hit[] = [];
-          renderHud(f, taken, hits);
-          renderRail(f, taken, hits);
+          const hudRect = renderHud(f, taken, hits);
+          renderRail(f, taken, hits, hudRect);
           renderEvents(f, taken, hits, eventMemo);
           renderZones(f, taken, hits, zoneMemo);
           ctx.globalAlpha = 1;

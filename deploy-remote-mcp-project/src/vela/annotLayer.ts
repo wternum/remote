@@ -14,7 +14,7 @@ import {
   pickCandidate,
   placeCard,
   wrapText,
-  zoneCandidates,
+  attachedZoneCandidates,
   type Column,
   type LevelGroup,
   type Occupancy,
@@ -442,8 +442,11 @@ function renderZones(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, str
     const y1 = Y(z.lo);
     if (x1 <= x0) continue;
     const box: Rect = { x: x0, y: Math.min(y0, y1), w: x1 - x0, h: Math.abs(y1 - y0) };
+    // 区域整个在屏幕上下之外：不画标签。以前会被挪到 K 线旁边，盖在别的区域上，还拉一条长引线指向屏幕外。
+    if (box.y + box.h < plot.y || box.y > plot.y + plot.h) { memo.delete(z.id); continue; }
     const w = textW(ctx, z.text) + 8;
-    const pick = pickCandidate(zoneCandidates(box, w, LABEL_H, occ), occ, taken, plot, memo.get(z.id));
+    // 和四框架图层同一规则：标签只能贴在自己的区域边上，放不下就不画文字，绝不漂到别的价位
+    const pick = pickCandidate(attachedZoneCandidates(box, w, LABEL_H), occ, taken, plot, memo.get(z.id));
     if (!pick) continue;
     memo.set(z.id, pick.key);
     const r = pick.rect;

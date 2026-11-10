@@ -135,7 +135,7 @@ const pass = (name: string) => { passed++; console.log(`  ✓ ${name}`); };
   }
   const fracEv = full.payload.events.find(e => e.id.startsWith('fw:frac:'));
   if (fracEv) {
-    assert.ok(fracEv.detail!.some(d => d.includes('才确认')), 'fractal hover text states exact confirmation time');
+    assert.ok(fracEv.detail!.some(d => /\d{2}:\d{2} 确认/.test(d)), 'fractal hover text states exact confirmation time');
   }
   pass('分形关闭不藏 HUD，且流动性/分形/AMT 锚点与悬停口径诚实');
 }

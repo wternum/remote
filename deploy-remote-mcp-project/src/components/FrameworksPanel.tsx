@@ -95,7 +95,7 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
   const live = useFrameworks(open);
   const markStore = getFrameworkMarkStore();
   const markPrefs = useSyncExternalStore(markStore.subscribe, markStore.getSnapshot, markStore.getSnapshot);
-  const { market, report, status, message, updatedAt } = live;
+  const { market, report, status, message, updatedAt, hud } = live;
   // Surface an incomplete REST history page instead of silently shrinking the lookback.
   const hubStatus = report ? barsHub.status(report.symbol, market.tf) : undefined;
 
@@ -149,10 +149,9 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
             图表标注 {markPrefs.enabled ? '开' : '关'}
           </button>
           {([
-            ['liquidity', '流动性'],
-            ['fractals', '分形'],
-            ['wyckoffFvg', 'Wyckoff / FVG'],
-            ['amt', 'AMT'],
+            ['liquidity', '突破 / 跌破'],
+            ['wyckoffFvg', '缺口'],
+            ['amt', '成交最多价'],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -191,13 +190,25 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
                 </div>
               )}
 
+              {hud && (
+                <div className="fw-block">
+                  <div className="fw-block-head">
+                    <div>
+                      <h3 className="fw-block-title">{hud.title}</h3>
+                      <p className="fw-block-sub">和图上右上角、底栏「标注」是同一个结论</p>
+                    </div>
+                  </div>
+                  {hud.detail.map(line => <p key={line} className="fw-reason">{line}</p>)}
+                </div>
+              )}
+
               <div className="fw-block">
                 <div className="fw-block-head">
                   <div>
-                    <h3 className="fw-block-title">结构汇总</h3>
-                    <p className="fw-block-sub">同一行情上的相关视角，不是独立投票或胜率</p>
+                    <h3 className="fw-block-title">四个视角各自怎么看</h3>
+                    <p className="fw-block-sub">明细，不是结论：同一行情上的相关视角，不是独立投票或胜率</p>
                   </div>
-                  {confluence && <span className="fw-bias" data-tone={toneOf(confluence.net)}>{verdictLabel(confluence.verdict)}</span>}
+                  {confluence && <span className="fw-bias mono" data-tone={toneOf(confluence.net)} title={verdictLabel(confluence.verdict)}>加权 {signed(confluence.net)}</span>}
                 </div>
                 <div className="fw-summary">
                   {summary.map(f => (
@@ -340,6 +351,9 @@ export default function FrameworksPanel({ open, onClose }: { open: boolean; onCl
               </Section>
 
               <p className="fw-foot">
+                图上只用已收盘 K 线：高低点要等右边 5 根收盘才算确认；「假突破 / 假跌破」是刺穿至少 0.2 倍平均波动后收盘收回，「突破 / 跌破」是收盘越过 0.1 倍平均波动；成交最多价按 K 线成交额估算。
+                这些标注配合起来是读盘的方式，不是下单建议；单个标注事后统计的方向命中都接近一半一半。
+                公共行情看不到真实挂单、止损单或机构身份。
                 四个视角共享同一 OHLCV 行情，多周期也是同源聚合，因此不是独立统计证据。加权分仅为未校准的结构强调度，不是概率、胜率或交易建议。AMT 需要逐根 exact quote 成交额；估算量不会冒充真实分布。真实主动差只在对应 K 线覆盖合格时显示。
               </p>
             </>
