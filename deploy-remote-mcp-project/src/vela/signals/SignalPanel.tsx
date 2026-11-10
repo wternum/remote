@@ -8,6 +8,12 @@ import {
 } from '../sessions/sessionMath';
 import { getSessionStore, type SessionStore } from '../sessions/sessionStore';
 import { MARKERS_ENABLED } from './runtime';
+import { fmtClock } from '@/lib/displayTime';
+
+/** 时段窗口按北京时间显示（窗口本身仍按 UTC / 当地夏令时定义） */
+const bjRange = (startMs: number, endMs: number) => `${fmtClock(startMs)}–${fmtClock(endMs)}`;
+/** 轨道仍是一个 UTC 自然日（北京 08:00 → 次日 08:00），刻度写北京时间 */
+const RAIL_TICKS = [0, 6, 12, 18, 24].map(h => ({ h, label: String((h + 8) % 24).padStart(2, '0') }));
 
 function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: () => void }) {
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`sa-switch ${checked ? 'is-on' : ''}`} onClick={onChange}><span className="sa-switch-track"><span /></span></button>;
@@ -33,7 +39,7 @@ function SessionRail({ now, mode, clockMode, prefs, onToggle }: {
   const spans = useMemo(() => computeSessionSpans(day, day + 86_400_000 - 1, {
     mode, clockMode, enabledSessions: { asia, london, ny }, showOverlap: prefs.showOverlap,
   }), [day, mode, clockMode, asia, london, ny, prefs.showOverlap]);
-  const windows = spans.map(sp => ({ id: sp.id, startMs: sp.startMs, endMs: sp.endMs, label: sp.utcWindow }));
+  const windows = spans.map(sp => ({ id: sp.id, startMs: sp.startMs, endMs: sp.endMs, label: `北京 ${bjRange(sp.startMs, sp.endMs)}（${sp.utcWindow}）` }));
   const disabled = (id: string) => id === 'asia' ? !prefs.enabledSessions.asia : id === 'london' ? !prefs.enabledSessions.london : id === 'ny' ? !prefs.enabledSessions.ny : !prefs.showOverlap;
   return <div className={`sx-rail-wrap ${prefs.enabled ? '' : 'is-disabled'}`}>
     <div className="sx-rail-legend" aria-label="时段完整名称">{spans.filter(sp => !sp.isOverlay && !disabled(sp.id)).map(sp =>
@@ -52,7 +58,7 @@ function SessionRail({ now, mode, clockMode, prefs, onToggle }: {
       })}
       <div className="sx-now" style={{ left: `${clock.dayProgressPct}%` }}><i /></div>
     </div>
-    <div className="sx-hours"><span>00</span><span>06</span><span className="sx-rail-current" style={{ left: `${Math.max(7, Math.min(93, clock.dayProgressPct))}%` }}>{clock.utcHHMM.replace(' UTC', '')}</span><span>12</span><span>18</span><span>24</span></div>
+    <div className="sx-hours">{RAIL_TICKS.slice(0, 2).map(t => <span key={t.h}>{t.label}</span>)}<span className="sx-rail-current" style={{ left: `${Math.max(7, Math.min(93, clock.dayProgressPct))}%` }}>{fmtClock(now)}</span>{RAIL_TICKS.slice(2).map(t => <span key={t.h}>{t.label}</span>)}</div>
   </div>;
 }
 
@@ -84,12 +90,12 @@ export default function SignalPanel({ store }: { store: SignalStore; ctx: Widget
       {state.status === 'error' && <div className="sa-alert" role="status"><Info size={13} /><span>{state.message}</span></div>}
       <section className="sx-desk" aria-label="交易时段调度台">
         <div className="sx-desk-head"><div><span className="sx-eyebrow">市场调度台</span><h2>交易时段</h2></div><Toggle checked={sp.enabled} label="显示交易时段标注" onChange={() => sessionStore.patch({ enabled: !sp.enabled })} /></div>
-        <div className="sx-clock-line"><span className="sx-clock-now">{clock.utcHHMM}</span><span>{clock.activeSessions.length ? clock.activeSessions.map(d => d.shortLabel).join(' · ') + ' 进行中' : `距${clock.nextSession.def.shortLabel} ${waitText(clock.nextSession.inMinutes)}`}</span></div>
+        <div className="sx-clock-line"><span className="sx-clock-now" title={clock.utcHHMM}>北京 {fmtClock(now)}</span><span>{clock.activeSessions.length ? clock.activeSessions.map(d => d.shortLabel).join(' · ') + ' 进行中' : `距${clock.nextSession.def.shortLabel} ${waitText(clock.nextSession.inMinutes)}`}</span></div>
         <SessionRail now={now} mode={sp.mode} clockMode={sp.clockMode} prefs={sp} onToggle={toggle} />
         {!summary.intraday && <p className="sx-note">当前周期已折叠日内色带；切回分钟或小时周期查看。</p>}
         <div className="sx-control-line"><span>时间口径</span><div className="sx-segment" role="group" aria-label="时间口径"><button type="button" aria-pressed={sp.clockMode === 'fixed'} className={sp.clockMode === 'fixed' ? 'is-active' : ''} onClick={() => sessionStore.patch({ clockMode: 'fixed' })}>固定 UTC</button><button type="button" aria-pressed={sp.clockMode === 'local'} className={sp.clockMode === 'local' ? 'is-active' : ''} onClick={() => sessionStore.patch({ clockMode: 'local' })}>本地夏令时</button></div></div>
         <div className="sx-control-line"><span>时段预设</span><div className="sx-segment" role="group" aria-label="时段预设"><button type="button" aria-pressed={sp.mode === 'macro'} className={sp.mode === 'macro' ? 'is-active' : ''} onClick={() => sessionStore.patch({ mode: 'macro' })}>宏观时段</button><button type="button" aria-pressed={sp.mode === 'killzone'} className={sp.mode === 'killzone' ? 'is-active' : ''} onClick={() => sessionStore.patch({ mode: 'killzone' })}>观察窗口</button></div></div>
-        <p className="sx-note">{sp.mode === 'killzone' ? '观察窗口为固定 UTC 教学预设，不等同全年交易所本地开盘。' : sp.clockMode === 'local' ? '伦敦/纽约按本地时间换算；亚太交易时段仍为 00–08 UTC 合成区间。' : '固定 UTC 教学预设；背景只标注时间，不证明方向或机构意图。'}</p>
+        <p className="sx-note">{sp.mode === 'killzone' ? '观察窗口为固定 UTC 教学预设，不等同全年交易所本地开盘。' : sp.clockMode === 'local' ? '伦敦/纽约按当地夏令时换算；亚太交易时段仍为北京 08–16 合成区间。时间均按北京时间显示。' : '固定 UTC 教学预设，按北京时间显示；背景只标注时间，不证明方向或机构意图。'}</p>
         <div className="sx-opacity"><div><label htmlFor="sx-band-opacity">背景浓度</label><output htmlFor="sx-band-opacity">{sp.bandOpacity}%</output></div><input id="sx-band-opacity" type="range" min="0" max="100" step="1" value={sp.bandOpacity} disabled={!sp.enabled || !sp.showBands} aria-label="时段背景浓度" onChange={e => sessionStore.patch({ bandOpacity: Number(e.target.value) })} style={{ '--sx-range': `${sp.bandOpacity}%` } as CSSProperties} /><div className="sx-range-ends"><span>透明</span><span>清晰</span></div></div>
       </section>
       <section className="sx-section" aria-label="时段列表">
@@ -98,7 +104,7 @@ export default function SignalPanel({ store }: { store: SignalStore; ctx: Widget
           const w = clock.windows.find(x => x.id === def.id) ?? (def.id === 'overlap' ? clock.overlap : null);
           const active = clock.activeSessions.some(x => x.id === def.id);
           return <div className={`sx-session ${checked(def.id) ? '' : 'is-muted'} ${active ? 'is-active' : ''}`} key={`${sp.mode}-${def.id}`} data-session-id={def.id} style={accent(def.hex)}>
-            <i className="sx-session-dot" /><div className="sx-session-main"><button type="button" className="sx-session-name" aria-expanded={details === def.id} onClick={() => setDetails(details === def.id ? null : def.id)}><strong>{def.name}</strong>{active && <small>进行中</small>}<ChevronDown size={12} className={details === def.id ? 'is-open' : ''} /></button><span className="sx-session-time">{w?.label ?? def.utcWindow}</span>{details === def.id && <p>{def.description}<br />{sp.mode === 'macro' && sp.clockMode === 'local' ? w?.localLabel ?? def.cnWindow : def.cnWindow}</p>}</div>
+            <i className="sx-session-dot" /><div className="sx-session-main"><button type="button" className="sx-session-name" aria-expanded={details === def.id} onClick={() => setDetails(details === def.id ? null : def.id)}><strong>{def.name}</strong>{active && <small>进行中</small>}<ChevronDown size={12} className={details === def.id ? 'is-open' : ''} /></button><span className="sx-session-time" title={w?.label ?? def.utcWindow}>{w ? bjRange(w.startMs, w.endMs) : def.cnWindow.replace('北京 ', '')}</span>{details === def.id && <p>{def.description}<br />{sp.mode === 'macro' && sp.clockMode === 'local' ? w?.localLabel ?? def.cnWindow : def.cnWindow}</p>}</div>
             <Toggle checked={checked(def.id)} label={`切换${def.name}`} onChange={() => toggle(def.id)} />
           </div>;
         })}</div>
@@ -109,7 +115,7 @@ export default function SignalPanel({ store }: { store: SignalStore; ctx: Widget
         {MARKERS_ENABLED && <div className="sx-signal-toggle"><span>双顶 / 双底观察</span><Toggle checked={prefs.enabled} label="显示信号标注" onChange={() => store.patch({ enabled: !prefs.enabled })} /></div>}
       </section>
       {asia && <section className="sx-section sx-anchor" aria-label="亚太交易时段高低点">
-        <div className="sx-section-head"><h3>亚太交易时段高低点</h3><span>{asia.dateLabel} · 00–08 UTC</span></div>
+        <div className="sx-section-head"><h3>亚太交易时段高低点</h3><span>{asia.dateLabel} · 北京 08–16</span></div>
         <div className="sx-anchor-grid"><div><span>区间高点</span><strong>{asia.high.toFixed(decimals)}</strong><small>{sweepText(asia.highState, true)}</small></div><div><span>区间低点</span><strong>{asia.low.toFixed(decimals)}</strong><small>{sweepText(asia.lowState, false)}</small></div></div>
         <div className="sx-anchor-foot"><span>区间振幅</span><b>{asia.rangePct.toFixed(2)}%</b><span>价格事实 · 非方向信号</span></div>
       </section>}

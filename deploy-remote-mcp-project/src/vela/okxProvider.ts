@@ -1,6 +1,7 @@
 import type { BarRange, DataProvider, OHLCV, ProviderInfo, SymbolDescriptor, SymbolInfo } from '@luxalgo/vela';
 import { parseOkxCandle, preferCandle } from '@/lib/okxCandles';
 import type { Candle, VolumeSource } from '@/lib/types';
+import { DISPLAY_TZ } from '@/lib/displayTime';
 
 // ─────────────────────────────────────────────────────────────
 //  OKX 永续 DataProvider：历史分页 REST + 公共 WebSocket 实时 K 线
@@ -14,11 +15,15 @@ const REST = 'https://www.okx.com';
 // historical REST data while the rest of the app used the 443 feed.
 const WS = 'wss://ws.okx.com/ws/v5/business';
 
-/** Vela 规范周期（分钟数 / 'D' / 'W' / 'M'）→ OKX bar 代号 */
+/**
+ * Vela 规范周期（分钟数 / 'D' / 'W' / 'M'）→ OKX bar 代号。
+ * 日 / 周 / 月线用 OKX 的北京时间（UTC+8）K 线：日线在北京 00:00 换日，与 OKX App 一致；
+ * 4H 及以下无论 UTC 还是北京时间都对齐在整点，两者相同。
+ */
 export function toOkxBar(tf: string): string {
-  if (tf === 'D' || tf === '1D') return '1Dutc';
-  if (tf === 'W' || tf === '1W') return '1Wutc';
-  if (tf === 'M' || tf === '1M') return '1Mutc';
+  if (tf === 'D' || tf === '1D') return '1D';
+  if (tf === 'W' || tf === '1W') return '1W';
+  if (tf === 'M' || tf === '1M') return '1M';
   const m = Number(tf);
   if (!Number.isFinite(m)) return '5m';
   if (m >= 60 && m % 60 === 0) return `${m / 60}H`;
@@ -109,6 +114,10 @@ const listeners = new Set<Listener>();
 const keyOf = (ticker: string, tf: string) => `${ticker}|${tf}`;
 
 const MAX_STORE_BARS = 12_000;
+/** 收盘看门狗：K 线结束后这么久仍没收到 confirm=1，就主动用 REST 拉一次（漏推/断流兜底） */
+export const CLOSE_WATCHDOG_MS = 2_000;
+/** 只给日内周期挂看门狗：日/周/月线的定时器跨度过长，且漏推后由下一根或重连补洞修复 */
+const WATCHDOG_MAX_BAR_MS = 4 * 3_600_000;
 
 /**
  * 同一时间戳的两份 K 线取较新的一份。
@@ -211,7 +220,7 @@ export class OKXProvider implements DataProvider {
       mintick: tick,
       pricescale: Math.round(1 / tick),
       minmove: 1,
-      timezone: 'Etc/UTC',
+      timezone: DISPLAY_TZ,
     } as SymbolInfo;
   }
 
@@ -336,6 +345,9 @@ export class OKXProvider implements DataProvider {
     let pongTimer: number | null = null;
     let backfillTimer: number | null = null;
     let healConfirmTimer: number | null = null;
+    let closeWatchTimer: number | null = null;
+    let closeWatchFor = -1;
+    const stepMs = tfMs(timeframe);
     let reconnectAttempt = 0;
     let opened = false;
     let backfilling = false;
@@ -413,26 +425,48 @@ export class OKXProvider implements DataProvider {
       }
     };
 
+    const repairConfirm = async () => {
+      if (stopped) return;
+      try {
+        const page = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '20' });
+        const fresh: OHLCV[] = [];
+        for (const r of page) {
+          const parsed = parseRow(r, ticker);
+          if (parsed) fresh.push(parsed);
+        }
+        if (fresh.length && !stopped) {
+          fresh.sort((a, b) => a.time - b.time);
+          merge(marketKey, fresh);
+        }
+      } catch {
+        /* next bar/reconnect will retry */
+      }
+    };
+
     const scheduleConfirmRepair = () => {
       if (stopped || healConfirmTimer) return;
-      healConfirmTimer = window.setTimeout(async () => {
+      healConfirmTimer = window.setTimeout(() => {
         healConfirmTimer = null;
-        if (stopped) return;
-        try {
-          const page = await okxGet('/api/v5/market/candles', { instId: ticker, bar, limit: '20' });
-          const fresh: OHLCV[] = [];
-          for (const r of page) {
-            const parsed = parseRow(r, ticker);
-            if (parsed) fresh.push(parsed);
-          }
-          if (fresh.length && !stopped) {
-            fresh.sort((a, b) => a.time - b.time);
-            merge(marketKey, fresh);
-          }
-        } catch {
-          /* next bar/reconnect will retry */
-        }
+        void repairConfirm();
       }, 1500);
+    };
+
+    /**
+     * 收盘看门狗：最新一根到点（结束 + CLOSE_WATCHDOG_MS）仍是 confirm=0，主动 REST 补一次。
+     * 以前只有「下一根第一笔推送到达」才会触发修复，行情清淡时结构标注会因此晚一整根以上。
+     */
+    const armCloseWatchdog = (latest: MarketBar) => {
+      if (stopped || latest.confirm !== 0 || !(stepMs > 0) || stepMs > WATCHDOG_MAX_BAR_MS) return;
+      if (closeWatchFor === latest.time && closeWatchTimer) return;
+      if (closeWatchTimer) window.clearTimeout(closeWatchTimer);
+      closeWatchFor = latest.time;
+      const due = latest.time + stepMs + CLOSE_WATCHDOG_MS - Date.now();
+      closeWatchTimer = window.setTimeout(() => {
+        closeWatchTimer = null;
+        if (stopped) return;
+        const b = (store.get(marketKey) ?? []).find(x => x.time === closeWatchFor) as MarketBar | undefined;
+        if (b && b.confirm === 0) void repairConfirm();
+      }, Math.max(0, due));
     };
 
     const open = () => {
@@ -481,6 +515,7 @@ export class OKXProvider implements DataProvider {
             const hasStaleUnconfirmed = cur.slice(-8).some(b => b.time < minNew && (b as MarketBar).confirm === 0);
             merge(marketKey, fresh);
             if (hasStaleUnconfirmed) scheduleConfirmRepair();
+            armCloseWatchdog(fresh.reduce((a, b) => (b.time > a.time ? b : a)));
           }
         } catch {
           /* ignore */
@@ -501,6 +536,7 @@ export class OKXProvider implements DataProvider {
       if (timer) { window.clearTimeout(timer); timer = null; }
       if (backfillTimer) { window.clearTimeout(backfillTimer); backfillTimer = null; }
       if (healConfirmTimer) { window.clearTimeout(healConfirmTimer); healConfirmTimer = null; }
+      if (closeWatchTimer) { window.clearTimeout(closeWatchTimer); closeWatchTimer = null; }
       clearSocketTimers();
       ws?.close();
     };

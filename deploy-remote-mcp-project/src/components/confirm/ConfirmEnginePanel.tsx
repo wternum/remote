@@ -34,6 +34,7 @@ import { clampThreshold, LIMITS } from '@/quant/config';
 import { contributionOf, gradeMeta, useEngine, type Row } from './useEngine';
 import type { FactorMeta } from './useEngine';
 import type { FactorAttribution } from '@/quant/stats';
+import { fmtDateTime } from '@/lib/displayTime';
 
 const LONG = '#2ebd85';
 const SHORT = '#f6465d';
@@ -47,10 +48,8 @@ const fmt = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '—');
 const ratio = (v: number | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : v >= 99 ? '∞' : v.toFixed(d));
 const pct = (v: number, d = 0) => (Number.isFinite(v) ? `${v.toFixed(d)}%` : '—');
 const signed = (v: number, d = 2) => `${v >= 0 ? '+' : ''}${fmt(v, d)}`;
-const hhmm = (ts: number) => {
-  const t = new Date(ts);
-  return `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-};
+// 北京时间（与图表时间轴一致），不随浏览器所在时区变化
+const hhmm = (ts: number) => fmtDateTime(ts);
 
 /** 持仓上限（K 线根数）换算成小时，用于说明形态是否已过期 */
 const cutoffLabel = (bars: number, barMs = 300_000) => `${((bars * barMs) / 3_600_000).toFixed(1)}h 窗口`;

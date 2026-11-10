@@ -4,6 +4,7 @@ import { registerLocale, unregisterSidePanel, unregisterWidgetAction } from '@lu
 import { localStorageAdapter, decodeState, encodeState } from '@luxalgo/vela/widget';
 import zhHans from '@luxalgo/vela/locales/zh-Hans';
 import { OKXProvider, OKX_TIMEFRAMES } from './okxProvider';
+import { DISPLAY_TZ } from '@/lib/displayTime';
 import { registerIndicatorPicker } from './registerIndicatorPicker';
 import { registerMarketControls } from './marketControls';
 import { installVelaHitFix } from './hitFix';
@@ -36,10 +37,17 @@ const isSupportedChartSymbol = (raw?: string) => {
   return /^(BTC|ETH|SOL)-USDT-SWAP$/.test(ticker);
 };
 
+/** 一次性迁移标记：旧版默认把显示时区存成 UTC；迁移一次后尊重用户在时间轴菜单里的选择。 */
+export const TZ_MIGRATION_KEY = 'pulsedesk.timezone-migrated.v1';
+
+type MarkerStore = Pick<Storage, 'getItem' | 'setItem'>;
+const defaultMarkerStore = (): MarkerStore | undefined => {
+  try { return typeof localStorage !== 'undefined' ? localStorage : undefined; } catch { return undefined; }
+};
+
 /** Remove retired audit-panel references and unsupported symbols from persisted layouts before Vela restores them. */
-export function workspaceStorage() {
-  const base = localStorageAdapter('pulsedesk-vela-workspace');
-  const clean = (raw: string | null): string | null => {
+export function workspaceStorage(base: Pick<ReturnType<typeof localStorageAdapter>, 'get' | 'set' | 'remove'> = localStorageAdapter('pulsedesk-vela-workspace'), markers: MarkerStore | undefined = defaultMarkerStore()) {
+  const clean = (raw: string | null, migrateTz = false): string | null => {
     if (!raw) return raw;
     try {
       const state = decodeState(raw);
@@ -59,11 +67,16 @@ export function workspaceStorage() {
           }
         }
       }
+      // 旧工作区保存的是当时的默认 UTC：读出时迁移一次到北京时间
+      if (migrateTz && markers && markers.getItem(TZ_MIGRATION_KEY) !== '1') {
+        if (state.timezone === 'Etc/UTC' || state.timezone === 'UTC') { state.timezone = DISPLAY_TZ; changed = true; }
+        try { markers.setItem(TZ_MIGRATION_KEY, '1'); } catch { /* private mode */ }
+      }
       return changed ? encodeState(state) : raw;
     } catch { return raw; }
   };
   return {
-    get: async (key: string) => clean(await base.get(key)),
+    get: async (key: string) => clean(await base.get(key), true),
     set: async (key: string, value: string) => { const next = clean(value); if (next != null) await base.set(key, next); },
     remove: async (key: string) => { await base.remove?.(key); },
   };
@@ -103,7 +116,7 @@ export default function VelaTerminal({ symbol = 'okx:BTC-USDT-SWAP', timeframe =
         live: true,
         theme: 'dark',
         locale: 'zh-Hans',
-        timezone: 'Etc/UTC',
+        timezone: DISPLAY_TZ,
         providers: { okx: () => new OKXProvider() },
         timeframes: [...OKX_TIMEFRAMES],
         volume: true,

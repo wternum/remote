@@ -1,4 +1,5 @@
 import { macroWindows, overlapWindow, type SessionClockMode, type ClockWindow } from './sessionClock';
+import { displayDayFloor, fmtClock, fmtMonthDay } from '../../lib/displayTime';
 // ─────────────────────────────────────────────────────────────
 //  交易时段计算引擎（UTC 基准纯函数模块）
 //  支持：
@@ -161,7 +162,7 @@ export const SESSION_STYLES: Record<SessionId, SessionStyle> = {
     shortLabel: '伦敦收盘观察时段',
     utcWindow: '15:00–17:00 UTC',
     cnWindow: '北京 23:00–01:00',
-    description: '欧盘头寸平仓结算与 16:00 UTC 资金费率节点，常见日内趋势减速或回撤再平衡。',
+    description: '欧盘头寸平仓结算与北京 00:00（16:00 UTC）资金费率节点，常见日内趋势减速或回撤再平衡。',
     hex: '#10b981',
     bandFill: 'rgba(16, 185, 129, 0.055)',
     bandTopBorder: 'rgba(52, 211, 153, 0.52)',
@@ -205,7 +206,7 @@ export const KILLZONE_SESSIONS: readonly SessionDefinition[] = [
     shortLabel: '亚太交易观察区间',
     utcWindow: '00:00–08:00 UTC',
     cnWindow: '北京 08:00–16:00',
-    description: '00:00–08:00 UTC 合成亚太交易区间，提供时段高点与时段低点参照。',
+    description: '北京 08:00–16:00（00:00–08:00 UTC）合成亚太交易区间，提供时段高点与时段低点参照。',
     startMin: 0,
     endMin: 8 * 60, // 00:00 - 08:00 UTC
   },
@@ -225,7 +226,7 @@ export const KILLZONE_SESSIONS: readonly SessionDefinition[] = [
     shortLabel: '纽约开盘观察窗口',
     utcWindow: '12:30–15:30 UTC',
     cnWindow: '北京 20:30–23:30',
-    description: '美国宏观数据（12:30/13:30）与美股开盘（13:30/14:30）窗口，二级突破与深度回踩高发期。',
+    description: '美国宏观数据（北京 20:30/21:30）与美股开盘（北京 21:30/22:30）窗口，二级突破与深度回踩高发期。',
     startMin: 12 * 60 + 30,
     endMin: 15 * 60 + 30, // 12:30 - 15:30 UTC
   },
@@ -328,7 +329,8 @@ export function computeSessionSpans(
         id: def.id,
         name: def.name,
         shortLabel: def.shortLabel,
-        badgeLabel: `${def.name} ${w ? w.label.replace(/\s*UTC$/, '') : formatMinToHHMM(def.startMin) + '–' + formatMinToHHMM(def.endMin)}`,
+        // 徽标显示北京时间；utcWindow 仍保留 UTC 原始定义
+        badgeLabel: `${def.name} ${fmtClock(startMs)}–${fmtClock(endMs)}`,
         utcWindow: w ? w.label : def.utcWindow,
         dayStartMs: dayMs,
         startMs,
@@ -342,7 +344,7 @@ export function computeSessionSpans(
 }
 
 /**
- * 计算可视范围内的 00:00 UTC 日界分割线
+ * 计算可视范围内的日界分割线：北京时间 00:00（与 OKX 1D 日线换日一致）
  */
 export function computeDailyDividers(
   bars: readonly BarLike[],
@@ -350,8 +352,8 @@ export function computeDailyDividers(
   maxTimeMs: number,
 ): DailyDivider[] {
   if (!bars.length || maxTimeMs < minTimeMs) return [];
-  const firstDay = utcDayFloor(minTimeMs);
-  const lastDay = utcDayFloor(maxTimeMs);
+  const firstDay = displayDayFloor(minTimeMs);
+  const lastDay = displayDayFloor(maxTimeMs);
   const startDay = Math.max(firstDay, lastDay - 60 * DAY_MS);
 
   // 为每天找到第一根 >= dayStartMs 的开盘价
@@ -365,7 +367,7 @@ export function computeDailyDividers(
     const openBar = barIdx < bars.length && bars[barIdx].time < dayMs + DAY_MS ? bars[barIdx] : null;
     dividers.push({
       dayStartMs: dayMs,
-      dateLabel: `${formatUtcMonthDay(dayMs)} 00:00`,
+      dateLabel: `${fmtMonthDay(dayMs)} 00:00`,
       openPrice: openBar ? openBar.open : null,
     });
   }

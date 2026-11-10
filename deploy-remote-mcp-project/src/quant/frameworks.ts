@@ -2,6 +2,7 @@
 // These views are correlated (and MTF resamples the same bars), not independent
 // statistical evidence. The confluence score is an un-calibrated heuristic.
 import type { Candle } from '@/lib/types';
+import { DISPLAY_OFFSET_MS } from '@/lib/displayTime';
 import { isClosedCandle, preferCandle, settledCandles } from '@/lib/okxCandles';
 import type { FlowSnapshot } from './flow';
 import { buildContext } from './context';
@@ -65,8 +66,9 @@ const validBar = (c: Candle | undefined): c is Candle => !!c &&
 
 function nextTimestamp(ts: number, interval: number): number {
   if (interval === 30 * DAY) {
-    const d = new Date(ts);
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    // OKX 1M candles open at Beijing midnight on the 1st (UTC+8)
+    const d = new Date(ts + DISPLAY_OFFSET_MS);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) - DISPLAY_OFFSET_MS;
   }
   return ts + interval;
 }

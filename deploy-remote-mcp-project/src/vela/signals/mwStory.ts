@@ -1,4 +1,5 @@
 import type { Ctx } from '@/quant/context';
+import { fmtDateTime } from '@/lib/displayTime';
 import type { FlowSnapshot } from '@/quant/flow';
 import { windowFlow } from '@/quant/orderflow';
 import { readSmartMoney } from '@/quant/smartmoney';
@@ -35,7 +36,7 @@ export interface MwStoryInput {
   livePrice?: number; members?: AnnotationPattern[];
 }
 const price = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: decimalsFor(v), maximumFractionDigits: decimalsFor(v) });
-const time = (ts: number) => new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC';
+const time = (ts: number) => fmtDateTime(ts);
 const ratio = (v: number | null) => v == null ? '无数据' : `${v.toFixed(2)}×`;
 const samePattern = (a: AnnotationPattern, b: AnnotationPattern) => a.side === b.side && a.first === b.first && a.second === b.second && a.idx === b.idx;
 

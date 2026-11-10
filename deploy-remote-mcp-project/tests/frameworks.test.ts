@@ -99,10 +99,11 @@ const quoted = (cs: Candle[]) => cs.map(c => ({ ...c, confirm: 1 as const, volum
   assert.equal(resample(full.slice(0, 2), MS, 3 * MS, { now }).length, 0, 'open tail is not a closed HTF candle');
   assert.equal(resample([full[0], full[2]], MS, 3 * MS, { now }).length, 0, 'missing child is not a complete bucket');
   assert.equal(resample(full.slice(0, 2), MS, 3 * MS, { now, includePartial: true })[0].confirm, 0);
-  const monday = Date.UTC(2024, 0, 1);
+  // 与 OKX 1D/1W 一致：周线从北京时间周一 00:00（= 周日 16:00 UTC）开始
+  const monday = Date.UTC(2024, 0, 1) - 8 * 3_600_000;
   const week = Array.from({ length: 7 }, (_, i) => bar(monday + i * 86_400_000, 100, 101, 99, 100, 1));
   const wr = resample(week, 86_400_000, 7 * 86_400_000, { now: monday + 7 * 86_400_000 });
-  assert.equal(wr.length, 1); assert.equal(wr[0].ts, monday, 'UTC week starts Monday, not Thursday epoch');
+  assert.equal(wr.length, 1); assert.equal(wr[0].ts, monday, 'Beijing week starts Monday 00:00, not Thursday epoch');
   pass('resample: exact OHLCV, complete-only buckets, gap rejection, Monday weekly origin');
 }
 

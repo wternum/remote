@@ -2,6 +2,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { Candle } from "@/lib/types";
 import { barMs } from "@/lib/types";
+import { fmtDateTime } from "@/lib/displayTime";
 import { registerVelaPlugins, OVERLAY_ID, CVD_ID, type OverlayPayload } from "./vela/plugins";
 
 /**
@@ -100,10 +101,7 @@ function fmtVol(v: number) {
 function fmt(v: number, d: number) {
   return v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
-function hhmm(ts: number) {
-  const t = new Date(ts);
-  return `${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
-}
+const hhmm = (ts: number) => fmtDateTime(ts); // 北京时间
 
 const VelaChart = forwardRef<VelaChartHandle, Props>(function VelaChart(
   { dataKey, symbol, bar, candles, payload, onBarClick },

@@ -3,6 +3,7 @@ import { Crosshair, RefreshCw, X } from 'lucide-react';
 import { WEAK_VIEW_FLOOR, type FrameworkReport } from '@/quant/frameworks';
 import { decimalsFor } from '@/vela/annotTypes';
 import { getFrameworkMarkStore } from '@/vela/frameworkMarkStore';
+import { DISPLAY_TZ } from '@/lib/displayTime';
 import { barsHub } from '@/vela/okxProvider';
 import { useFrameworks } from './frameworks/useFrameworks';
 import './frameworks/frameworks.css';
@@ -14,7 +15,7 @@ const fmtPrice = (n: number | null | undefined, ref: number) => {
   return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 };
 const signed = (v: number | null | undefined, d = 2) => v == null || !Number.isFinite(v) ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
-const timeOf = (ts: number) => ts > 0 ? new Date(ts).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+const timeOf = (ts: number) => ts > 0 ? new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, timeZone: DISPLAY_TZ }) : '—';
 
 type Tone = 'long' | 'short' | undefined;
 const toneOf = (bias: number, unavailable = false): Tone => unavailable ? undefined : bias > 0 ? 'long' : bias < 0 ? 'short' : undefined;

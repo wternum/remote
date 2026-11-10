@@ -43,6 +43,8 @@ export interface AnnEvent {
   marker: 'tri' | 'diamond';
   title?: string;
   detail?: string[];
+  /** 事后确认型标注（如分形）：确认那根 K 线的开盘时间，图上画一条虚线小尾巴指到确认位置 */
+  confirmTs?: number;
 }
 
 export interface AnnZone {

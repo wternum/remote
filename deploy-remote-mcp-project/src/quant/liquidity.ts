@@ -31,6 +31,24 @@ export interface LiquidityPoolCluster {
   distanceAtr: number;
 }
 
+/**
+ * 待确认摆动点：左侧 8 根都更低/更高，右侧已收盘 2–4 根还没被越过，只差右侧凑满 5 根。
+ * 只做"提前看见"的参考线，不参与扫位/越位、等高等低池和方向判断。
+ */
+export interface PendingSwing {
+  side: 'above' | 'below';
+  price: number;
+  idx: number;
+  ts: number;
+  /** 右侧已收盘根数（2–4） */
+  rightBars: number;
+  /** 确认所需右侧根数（5） */
+  needBars: number;
+  /** 若右侧继续不越过，将在这根收盘后确认（开盘时间） */
+  confirmTs: number;
+  distanceAtr: number;
+}
+
 export interface StopHunt {
   side: 'above' | 'below';
   level: number;
@@ -53,6 +71,9 @@ export interface LiquidityRead {
   /** 最近的未破等高 / 等低池（≥2 个摆动）。常比更近的单个前高/前低更重要，单独给出。 */
   poolAbove: LiquidityPoolCluster | null;
   poolBelow: LiquidityPoolCluster | null;
+  /** 待确认前高/前低（右侧 2–4 根），确认前只作提示 */
+  pendingAbove: PendingSwing | null;
+  pendingBelow: PendingSwing | null;
   stopHunts: StopHunt[];
   structure: StructureEvent | null;
   structureTs: number | null;
@@ -81,6 +102,45 @@ function confirmedLevels(ctx: Ctx, maxAge: number): ConfirmedLevel[] {
       const confirmedIdx = l.idx + RIGHT_CONFIRM_BARS;
       return { ...l, confirmedIdx, confirmedTs: ctx.cs[confirmedIdx]?.ts ?? l.ts };
     });
+}
+
+const PENDING_MIN_RIGHT = 2;
+
+/**
+ * 与 findSwingLevels 同一判定（左 8 严格、右侧不越过、前段至少 1.5 ATR 趋势腿），
+ * 只是右侧只收盘了 2–4 根。每侧至多一个（新的候选必然落在旧候选的右窗内而矛盾）。
+ */
+export function pendingSwings(ctx: Ctx, left = 8, priorAtr = 1.5): { above: PendingSwing | null; below: PendingSwing | null } {
+  const { cs, n } = ctx;
+  const to = n - 1;
+  const out: { above: PendingSwing | null; below: PendingSwing | null } = { above: null, below: null };
+  if (to < left + PENDING_MIN_RIGHT + 1) return out;
+  const step = cs[to].ts - cs[to - 1].ts;
+  const a = scaleOf(ctx, to);
+  const price = cs[to].c;
+  for (let r = RIGHT_CONFIRM_BARS - 1; r >= PENDING_MIN_RIGHT; r--) {
+    const j = to - r;
+    if (j - left < 0) continue;
+    for (const side of ['top', 'bottom'] as const) {
+      const key = side === 'top' ? 'above' : 'below';
+      if (out[key]) continue;
+      const ext = side === 'top' ? cs[j].h : cs[j].l;
+      let ok = true;
+      for (let k = j - left; k < j && ok; k++) if (side === 'top' ? cs[k].h >= ext : cs[k].l <= ext) ok = false;
+      for (let k = j + 1; k <= to && ok; k++) if (side === 'top' ? cs[k].h > ext : cs[k].l < ext) ok = false;
+      if (!ok) continue;
+      let prior = side === 'top' ? Infinity : -Infinity;
+      for (let k = Math.max(0, j - 24); k < j; k++) prior = side === 'top' ? Math.min(prior, cs[k].l) : Math.max(prior, cs[k].h);
+      const atrJ = Number.isFinite(ctx.atr[j]) && ctx.atr[j] > 0 ? ctx.atr[j] : a;
+      if (!(Math.abs(ext - prior) >= priorAtr * atrJ)) continue;
+      out[key] = {
+        side: key, price: ext, idx: j, ts: cs[j].ts, rightBars: r, needBars: RIGHT_CONFIRM_BARS,
+        confirmTs: cs[to].ts + (RIGHT_CONFIRM_BARS - r) * step,
+        distanceAtr: r3(Math.abs(price - ext) / a),
+      };
+    }
+  }
+  return out;
 }
 
 /** Bounded-width EQH/EQL clusters; only unbroken swings form active equal-level pools. */
@@ -245,7 +305,7 @@ export function stopHunts(ctx: Ctx, lookback = 160, minDepthAtr = 0.2, minTouche
 /** Only fresh events drive bias; historical events remain visible but decay to zero. */
 export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
   const to = ctx.n - 1;
-  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, poolAbove: null, poolBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, bias: 0, strength: 0, headline: '没有已收盘行情。' };
+  if (to < 0) return { pools: [], nearestAbove: null, nearestBelow: null, poolAbove: null, poolBelow: null, pendingAbove: null, pendingBelow: null, stopHunts: [], structure: null, structureTs: null, structureAgeBars: null, bias: 0, strength: 0, headline: '没有已收盘行情。' };
   const price = ctx.cs[to].c;
   const { tops, bottoms } = equalLevels(ctx);
   const pools = [...tops, ...bottoms];
@@ -256,6 +316,7 @@ export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
   const poolAbove = pickNearest(tops, p => p.price >= price && p.active && p.equal);
   const poolBelow = pickNearest(bottoms, p => p.price <= price && p.active && p.equal);
   const hunts = stopHunts(ctx, lookback);
+  const pending = pendingSwings(ctx);
   const structure = latestStructure(ctx, to);
   const structureTs = structure ? ctx.cs[structure.idx]?.ts ?? null : null;
   const structureAgeBars = structure ? to - structure.idx : null;
@@ -275,5 +336,5 @@ export function readLiquidity(ctx: Ctx, lookback = 160): LiquidityRead {
     : structure && to - structure.idx <= FRESH_EVENT_BARS
       ? `近期无新的扫位事件；${to - structure.idx} 根前出现简化 ${structure.kind} 收盘越位事件。`
       : '近期没有足够新的扫位/越位证据；历史关键位仅作参考，方向保持中性。';
-  return { pools, nearestAbove, nearestBelow, poolAbove, poolBelow, stopHunts: hunts, structure, structureTs, structureAgeBars, bias, strength, headline };
+  return { pools, nearestAbove, nearestBelow, poolAbove, poolBelow, pendingAbove: pending.above, pendingBelow: pending.below, stopHunts: hunts, structure, structureTs, structureAgeBars, bias, strength, headline };
 }

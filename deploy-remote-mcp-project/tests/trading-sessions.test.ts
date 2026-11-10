@@ -32,17 +32,17 @@ const BASE_DAY = Date.UTC(2026, 10, 7, 0, 0, 0); // 2026-11-07 00:00:00 UTC
   const asia = spans.find(s => s.dayStartMs === BASE_DAY && s.id === 'asia')!;
   assert.equal(asia.startMs, BASE_DAY);
   assert.equal(asia.endMs, BASE_DAY + 8 * 3600_000);
-  assert.equal(asia.badgeLabel, '亚太交易时段 00:00–08:00');
+  assert.equal(asia.badgeLabel, '亚太交易时段 08:00–16:00'); // 徽标为北京时间
 
   const london = spans.find(s => s.dayStartMs === BASE_DAY && s.id === 'london')!;
   assert.equal(london.startMs, BASE_DAY + 8 * 3600_000);
   assert.equal(london.endMs, BASE_DAY + 16 * 3600_000);
-  assert.equal(london.badgeLabel, '伦敦交易时段 08:00–16:00');
+  assert.equal(london.badgeLabel, '伦敦交易时段 16:00–00:00');
 
   const ny = spans.find(s => s.dayStartMs === BASE_DAY && s.id === 'ny')!;
   assert.equal(ny.startMs, BASE_DAY + 13 * 3600_000);
   assert.equal(ny.endMs, BASE_DAY + 21 * 3600_000);
-  assert.equal(ny.badgeLabel, '纽约交易时段 13:00–21:00');
+  assert.equal(ny.badgeLabel, '纽约交易时段 21:00–05:00');
 
   const overlap = spans.find(s => s.dayStartMs === BASE_DAY && s.id === 'overlap')!;
   assert.equal(overlap.startMs, BASE_DAY + 13 * 3600_000);
@@ -102,9 +102,13 @@ const BASE_DAY = Date.UTC(2026, 10, 7, 0, 0, 0); // 2026-11-07 00:00:00 UTC
   ];
   assert.equal(isIntradayTimeframe(bars5m), true);
 
-  const divs = computeDailyDividers(bars5m, BASE_DAY - 600_000, BASE_DAY + 600_000);
+  // 日界线是北京时间 00:00（= 前一日 16:00 UTC），与 OKX 1D 换日一致；UTC 00:00 不再画线
+  assert.equal(computeDailyDividers(bars5m, BASE_DAY - 600_000, BASE_DAY + 600_000).length, 0);
+  const BJ_DAY = BASE_DAY - 8 * 3_600_000;
+  const bjBars: BarLike[] = bars5m.map(b => ({ ...b, time: b.time - 8 * 3_600_000 }));
+  const divs = computeDailyDividers(bjBars, BJ_DAY - 600_000, BJ_DAY + 600_000);
   assert.equal(divs.length, 1);
-  assert.equal(divs[0].dayStartMs, BASE_DAY);
+  assert.equal(divs[0].dayStartMs, BJ_DAY);
   assert.equal(divs[0].dateLabel, '11-07 00:00');
   assert.equal(divs[0].openPrice, 90050);
 

@@ -417,6 +417,28 @@ function renderEvents(f: Frame, taken: Rect[], hits: Hit[], memo: Map<string, st
     .filter((g): g is NonNullable<typeof g> => !!g);
 
   for (const g of geo) {
+    // 事后确认型标注：从标记引一条细虚线到确认那根，末端一个小点（K 线太密时省略）
+    if (g.ev.confirmTs != null && bw >= 2) {
+      const cb = f.barAt(g.ev.confirmTs);
+      if (cb && cb.x - g.b.x > s + 2) {
+        const c = TONE_COLOR[g.ev.tone];
+        const y = Math.round(g.ev.side === 'above' ? g.apex - s : g.apex + s) + 0.5;
+        ctx.save();
+        ctx.strokeStyle = rgba(c, 0.45);
+        ctx.lineWidth = 1;
+        ctx.setLineDash([1, 2]);
+        ctx.beginPath();
+        ctx.moveTo(g.b.x + s, y);
+        ctx.lineTo(cb.x, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = rgba(c, 0.8);
+        ctx.beginPath();
+        ctx.arc(cb.x, y, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
     marker(ctx, g.b.x, g.apex, g.ev.side, g.ev.marker, TONE_COLOR[g.ev.tone], s);
     taken.push(g.mr);
   }

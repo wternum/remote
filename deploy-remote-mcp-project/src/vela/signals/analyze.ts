@@ -1,5 +1,6 @@
 import type { Candle } from '@/lib/types';
 import { isClosedCandle, preferCandle, settledCandles } from '@/lib/okxCandles';
+import { fmtDateTime } from '@/lib/displayTime';
 import { buildContext } from '@/quant/context';
 import type { FlowSnapshot } from '@/quant/flow';
 import { findSwingLevels, readBreakout } from '@/quant/orderflow';
@@ -11,7 +12,7 @@ import { emptyCounts, emptySignalPayload, type SignalItem, type SignalPreference
 export { takerObservation, legFlow } from './evidence';
 
 const priceText = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: decimalsFor(n), maximumFractionDigits: decimalsFor(n) });
-const hhmmOf = (ts: number) => new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC';
+const hhmmOf = (ts: number) => fmtDateTime(ts);
 export interface SignalAnalysis {
   items: SignalItem[];
   covered: number;

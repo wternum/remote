@@ -18,7 +18,7 @@ assert.equal(SESSION_STYLES.asia.name, '亚太交易时段');
 assert.equal(SESSION_STYLES.london.name, '伦敦交易时段');
 assert.equal(SESSION_STYLES.ny.name, '纽约交易时段');
 assert.ok(spans.every(s => s.badgeLabel.startsWith(s.name) && s.badgeLabel.includes('–')));
-assert.equal(spans.find(s => s.id === 'asia')!.badgeLabel, '亚太交易时段 00:00–08:00');
+assert.equal(spans.find(s => s.id === 'asia')!.badgeLabel, '亚太交易时段 08:00–16:00');
 // The audit sidebar is retired entirely, including its old persisted-layout id.
 assert.equal(existsSync('src/vela/priceAction/registerPriceActionPanel.tsx'), false);
 assert.equal(existsSync('src/vela/priceAction/PriceActionPanel.tsx'), false);

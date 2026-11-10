@@ -24,6 +24,7 @@ import {
   type BarLike,
 } from './sessionMath';
 import { getSessionStore, type SessionPreferences } from './sessionStore';
+import { fmtClock } from '../../lib/displayTime';
 
 export const SESSION_UNDER_ID = 'pd-session-under';
 export const SESSION_OVER_ID = 'pd-session-over';
@@ -383,7 +384,7 @@ function renderSessionOver(canvas: HTMLCanvasElement | null, args: RendererLayer
 
       // 完整中文名称 + 实际起止时间。长名称分两行，避免横向截断；
       // 窄到连两行都放不下时才隐藏，侧栏完整图例仍可查。
-      const timeLabel = sp.utcWindow.replace(/\s*UTC$/, '');
+      const timeLabel = `${fmtClock(sp.startMs)}–${fmtClock(sp.endMs)}`; // 北京时间
       const twoLine = ctx.measureText(`${sp.name} ${timeLabel}`).width + 20 > Math.min(260, x1 - Math.max(RIBBON_LEFT, x0 + 4));
       const pillW = Math.ceil(Math.max(ctx.measureText(sp.name).width, twoLine ? ctx.measureText(timeLabel).width : ctx.measureText(`${sp.name} ${timeLabel}`).width) + 20);
       const pillH = twoLine ? 29 : BADGE_H;

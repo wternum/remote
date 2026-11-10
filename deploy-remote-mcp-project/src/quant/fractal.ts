@@ -4,28 +4,35 @@
 // A pivot is tradable information only after its rightmost confirming bar closes.
 import type { Candle, VolumeSource } from '@/lib/types';
 import { isClosedCandle } from '@/lib/okxCandles';
+import { DISPLAY_OFFSET_MS } from '@/lib/displayTime';
 
 const r3 = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(3)) : 0);
 const DAY = 86_400_000;
 const WEEK = 7 * DAY;
-const WEEK_EPOCH_OFFSET = 4 * DAY; // 1970-01-01 was Thursday; UTC weeks start Monday.
+const WEEK_EPOCH_OFFSET = 4 * DAY; // 1970-01-01 was Thursday; weeks start Monday.
 
 const validBar = (c: Candle | undefined): c is Candle => !!c &&
   [c.ts, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite) &&
   Number.isSafeInteger(c.ts) && c.ts > 0 && c.l > 0 &&
   c.h >= Math.max(c.o, c.c) && c.l <= Math.min(c.o, c.c) && c.v >= 0;
 
+/**
+ * Higher-timeframe buckets are anchored to Beijing midnight (UTC+8), matching the OKX
+ * 1D/1W/1M candles the chart now shows. For 1h/2h/4h buckets an 8h offset is a whole
+ * number of buckets, so they are identical to UTC; 6h/12h/1d/1w/1M differ.
+ */
 function bucketBounds(ts: number, interval: number): { start: number; end: number } {
+  const o = DISPLAY_OFFSET_MS;
   if (interval >= 28 * DAY) {
-    const d = new Date(ts);
-    const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-    return { start, end: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) };
+    const d = new Date(ts + o);
+    const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - o;
+    return { start, end: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) - o };
   }
   if (interval === WEEK) {
-    const start = Math.floor((ts - WEEK_EPOCH_OFFSET) / WEEK) * WEEK + WEEK_EPOCH_OFFSET;
+    const start = Math.floor((ts + o - WEEK_EPOCH_OFFSET) / WEEK) * WEEK + WEEK_EPOCH_OFFSET - o;
     return { start, end: start + WEEK };
   }
-  const start = Math.floor(ts / interval) * interval;
+  const start = Math.floor((ts + o) / interval) * interval - o;
   return { start, end: start + interval };
 }
 

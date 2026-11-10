@@ -10,6 +10,7 @@ import {
   type AnnZone,
 } from '@/vela/annotTypes';
 import type { FrameworkReport } from './frameworks';
+import { fmtDateTime } from '@/lib/displayTime';
 import type { HighRel, LowRel, Tfbias } from './fractal';
 import type { LiquidityPoolCluster } from './liquidity';
 
@@ -114,9 +115,8 @@ const emptyPayload = (decimals = 2): AnnPayload => ({
   rev: 0,
 });
 
-/** 图表时区为 UTC：悬停里统一写 "11-09 22:50"，不再附加 "UTC" 噪音 */
-const fmtTime = (ts: number | null | undefined) =>
-  ts != null && Number.isFinite(ts) ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') : '—';
+/** 图表时区为北京时间：悬停里统一写 "11-10 06:50"（与时间轴一致，不再附加时区后缀） */
+const fmtTime = fmtDateTime;
 /** 窗口时长：5m→"10 小时"，4H→"20 天"，1D→"120 天"（不再出现"2880 小时"） */
 const hoursText = (bars: number, barMs: number) => {
   const h = (bars * barMs) / 3_600_000;
@@ -231,7 +231,7 @@ export function projectFrameworkMarks(
 
   // 2. Liquidity: nearest reference + nearest equal-level pool, fresh stop-hunts, latest BOS/CHoCH.
   if (prefs.liquidity) {
-    const { nearestAbove, nearestBelow, poolAbove, poolBelow, stopHunts, structure, structureTs, structureAgeBars } = report.liquidity;
+    const { nearestAbove, nearestBelow, poolAbove, poolBelow, pendingAbove, pendingBelow, stopHunts, structure, structureTs, structureAgeBars } = report.liquidity;
     const poolLevel = (p: Pool, id: string): AnnLevel => {
       const up = p.side === 'above';
       const word = up ? '高点' : '低点';
@@ -264,6 +264,30 @@ export function projectFrameworkMarks(
     // 更近的单个前高/前低会挡住真正的等高/等低池（例如 SOL 86.21 前低挡住 86.10 双底）：两者都画。
     if (within(poolAbove) && poolAbove.price !== nearestAbove?.price) levels.push(poolLevel(poolAbove, 'fw:liq:pool-above'));
     if (within(poolBelow) && poolBelow.price !== nearestBelow?.price) levels.push(poolLevel(poolBelow, 'fw:liq:pool-below'));
+
+    // 待确认前高/前低：右侧才收盘 2–4 根，提前给出参考线（虚线、低优先级），确认后自动换成正式前高/前低。
+    for (const pd of [pendingAbove, pendingBelow]) {
+      if (!pd || !Number.isFinite(pd.price) || pd.distanceAtr > MAX_POOL_DISTANCE_ATR) continue;
+      const up = pd.side === 'above';
+      if (levels.some(l => Math.abs(l.price - pd.price) <= Math.abs(pd.price) * 0.0002)) continue;
+      levels.push({
+        id: `fw:liq:pending-${pd.side}`,
+        price: pd.price,
+        fromTs: pd.ts,
+        toTs: null,
+        tone: up ? 'top' : 'bottom',
+        name: `${up ? '前高' : '前低'}（待确认 ${pd.rightBars}/${pd.needBars}）`,
+        style: 'dashed',
+        rank: 'normal',
+        priority: 48,
+        label: prefs.labels,
+        detail: [
+          `${fmtTime(pd.ts)} 那根的${up ? '高点' : '低点'} ${fmt(pd.price)}：左边 8 根都比它${up ? '低' : '高'}，右边已收盘 ${pd.rightBars} 根也没越过。`,
+          `再收 ${pd.needBars - pd.rightBars} 根不越过就正式成为${up ? '前高' : '前低'}（预计 ${fmtTime(pd.confirmTs + barMs)} 收盘后）；中途被越过这条线会直接消失。`,
+          '提前显示只为让你早点看见，未确认前不参与扫位 / 突破判断。',
+        ],
+      });
+    }
 
     for (const h of stopHunts.filter(x => x.ageBars <= FRESH_STOP_HUNT_BARS).slice(0, MAX_STOP_HUNT_MARKS)) {
       const above = h.side === 'above';
@@ -405,6 +429,8 @@ export function projectFrameworkMarks(
           text: prefs.labels ? p.rel : '',
           priority: 62,
           marker: 'tri',
+          // 分形要等右侧 2 根收盘：标记画在极值那根，虚线小尾巴指到真正确认的那根
+          confirmTs: p.confirmedAt - barMs,
           title: `${REL_DESC[p.rel]} · ${fmt(p.price)}`,
           detail: [
             `${REL_MEANING[p.rel]}${versus}`,

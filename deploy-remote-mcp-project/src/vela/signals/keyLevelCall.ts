@@ -4,6 +4,7 @@ import { decimalsFor, type AnnTone } from '../annotTypes';
 import { annotationTolerance, type AnnotationPattern } from './patterns';
 import { evaluateLine, type LineRead } from './scenario';
 import type { SignalItem, SignalSource } from './store';
+import { fmtClock } from '@/lib/displayTime';
 
 /** 关键位判读只看这几件事：谁被套（诱多/诱空）、会不会回调、该买该卖还是等。 */
 export type TrapKind = 'bull' | 'bear' | null;
@@ -41,7 +42,7 @@ export interface KeyLevelCallInput {
 const fmt = (v: number) => v.toLocaleString('en-US', {
   minimumFractionDigits: decimalsFor(v), maximumFractionDigits: decimalsFor(v),
 });
-const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16);
+const hhmm = (ts: number) => fmtClock(ts); // 北京时间
 const volX = (v: number) => `${v.toFixed(1)}×`;
 
 /** 同一价位被反复识别时只保留最近的一次；否则一条阻力上会叠十几个双顶。 */

@@ -1,3 +1,5 @@
+import { fmtClock, fmtDateTime as fmtBjDateTime } from "./displayTime";
+
 export function priceDecimals(symbol: string): number {
   if (symbol.startsWith("BTC")) return 1;
   if (symbol.startsWith("ETH")) return 2;
@@ -37,24 +39,14 @@ export function fmtPct(p: number | undefined | null, digits = 1): string {
   return (p >= 0 ? "+" : "") + p.toFixed(digits) + "%";
 }
 
+/** 北京时间 HH:MM（与图表时间轴一致，不随浏览器所在时区变化） */
 export function fmtTime(ts: number): string {
-  const d = new Date(ts);
-  return (
-    String(d.getHours()).padStart(2, "0") +
-    ":" +
-    String(d.getMinutes()).padStart(2, "0")
-  );
+  return fmtClock(ts);
 }
 
+/** 北京时间 MM-DD HH:MM */
 export function fmtDateTime(ts: number): string {
-  const d = new Date(ts);
-  return (
-    String(d.getMonth() + 1).padStart(2, "0") +
-    "-" +
-    String(d.getDate()).padStart(2, "0") +
-    " " +
-    fmtTime(ts)
-  );
+  return fmtBjDateTime(ts);
 }
 
 export function fmtDurBars(bars: number, bar: string): string {

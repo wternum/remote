@@ -8,6 +8,7 @@ import { projectFrameworkMarks } from '@/quant/frameworkMarks';
 import type { AnnObstacle } from './annotTypes';
 import { FW_OVER, FW_UNDER, registerFrameworkLayers, type FrameworkLayerData } from './frameworkLayer';
 import { getFrameworkMarkStore } from './frameworkMarkStore';
+import { isClosedCandle } from '@/lib/okxCandles';
 import {
   DEFAULT_FRAMEWORK_MARKET,
   frameworkInputKey,
@@ -31,6 +32,15 @@ export interface FrameworkLiveSnapshot {
 
 const DEFAULT_MARKET: FrameworkMarket = DEFAULT_FRAMEWORK_MARKET;
 const THROTTLE_MS = 1000;
+
+/** 最近一根已收盘 K 线的时间（只看尾部几根）；变化 = 刚收盘，结构需立即重算 */
+export function latestClosedTs(raw: readonly { time: number }[], barMs: number, now: number): number {
+  for (let i = raw.length - 1, n = 0; i >= 0 && n < 6; i--, n++) {
+    const c = toCandle(raw[i] as Parameters<typeof toCandle>[0]);
+    if (c.ts < now && isClosedCandle(c, barMs, now)) return c.ts;
+  }
+  return -1;
+}
 
 // Shared reactive snapshot so FrameworksPanel and FrameworkBar read the same cached report.
 let liveState: FrameworkLiveSnapshot = {
@@ -78,6 +88,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let attachTimer: ReturnType<typeof setTimeout> | undefined;
   let lastRunAt = 0;
+  let lastClosedSeen = -1;
   let forcePending = false;
   let flowController: AbortController | null = null;
   let flowMarket = '';
@@ -183,6 +194,7 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
     market = next;
     marketKey = nextKey;
     inputKey = '';
+    lastClosedSeen = -1;
     cachedReport = null;
     paintFingerprint = '';
     publishLive({
@@ -304,7 +316,13 @@ function mountFrameworkRuntime(ctx: WidgetContext): () => void {
   }
 
   const offBars = barsHub.subscribe(key => {
-    if (key === marketKey) schedule();
+    if (key !== marketKey) return;
+    // 收盘那一刻跳过 1 秒节流：FVG / 扫位 / BOS 等收盘事件随 confirm 推送立即出现；
+    // 形成中的价格跳动仍按节流合并（它们不会改变结构结果）。
+    const closedTs = latestClosedTs(barsHub.get(market.symbol, market.tf), market.barMs, Date.now());
+    const justClosed = closedTs !== lastClosedSeen;
+    lastClosedSeen = closedTs;
+    schedule(justClosed);
   });
   const offFlow = subscribeFlow(snap => {
     if (snap.instId === market.symbol && snap.period === flowPeriodOf(market.tf)) schedule();

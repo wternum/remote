@@ -21,7 +21,7 @@ export interface SessionPreferences {
   showBadges: boolean;
   /** 是否绘制亚太交易时段高低点 (AH / AL) 延伸线与扫荡状态 */
   showAsiaRange: boolean;
-  /** 是否绘制 00:00 UTC 日界分割线 */
+  /** 是否绘制日界分割线（北京时间 00:00） */
   showDailyOpen: boolean;
   /** 是否高亮欧美重叠期 / 伦敦收盘区 */
   showOverlap: boolean;
